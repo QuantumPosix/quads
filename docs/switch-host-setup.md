@@ -17,8 +17,8 @@ General guidelines of how to setup your network switches, servers and DNS for QU
           * [Foreman Tuning](#foreman-tuning)
           * [Create Foreman Roles and Filters](#create-foreman-roles-and-filters)
           * [Adding New QUADS Host IPMI](#adding-new-quads-host-ipmi)
-          * [Add Optional SSH Keys](add-optional-ssh-keys)
-          * [Create QUADS IPMI Credentials](create-quads-ipmi-credentials)
+          * [Add Optional SSH Keys](#add-optional-ssh-keys)
+          * [Create QUADS IPMI Credentials](#create-quads-ipmi-credentials)
       * [Define Optional Public VLANS](#define-optional-public-vlans)
         * [Define Publicly Routable VLANS on TOR Switches](#define-publicly-routable-vlans-on-tor-switches)
         * [Define Publicly Routable VLANS on Distribution Switches](#define-publicly-routable-vlans-on-distribution-switches)
@@ -192,15 +192,16 @@ MaxKeepAliveRequests 200
 #### Create Foreman Roles and Filters
    * This is Foreman-specific so if you want another provisioning backend you can ignore it.
    * We use RBAC roles and filters to allow per-cloud Foreman views into subsets of machines, QUADS will manage this for you once created.
-      * Each server has a role named after it
+      * Foreman views are based on system ownership of cloud users (generic users per environment)
+      * You need to create two roles, with filters below - `clouduser_views` and `clouduser_hosts`
       * Each server role has filters attached that grant it certain permissions
-   * Create a role per server
+   * Create the `clouduser_hosts` role
 ```
-hammer role create --name host01.example.com
+hammer role create --name clouduser_hosts
 ```
-   * Create a filter with access permissions and associate it with that role
+   * Create a filter with a singular search scope of `user.login = current_user`
 ```
-hammer filter create --role host01.example.com --search "name = host01.example.com" --permissions view_hosts,edit_hosts,build_hosts,power_hosts,console_hosts --role-id $(hammer role info --name host01.example.com | egrep ^Id: | awk '{ print $NF }')
+hammer filter create --role clouduser_hosts --search "user.login = current_user" --permissions view_hosts,edit_hosts,build_hosts,power_hosts,console_hosts --role-id $(hammer role info --name clouduser_hosts | egrep ^Id: | awk '{ print $NF }')
 ```
    * Next you'll need to make a Foreman user per unique cloud environment if they don't exist already
 ```
@@ -221,20 +222,35 @@ hammer filter update --role clouduser_views --permissions view_architectures --i
 hammer filter update --role clouduser_views --permissions view_media --id $(hammer filter list | grep clouduser_views | awk '{print $1}')
 hammer filter update --role clouduser_views --permissions view_ptables --id $(hammer filter list | grep clouduser_views | awk '{print $1}')
 hammer filter update --role clouduser_views --permissions edit_params,view_params --id $(hammer filter list | grep clouduser_views | awk '{print $1}')
+hammer filter update --role clouduser_views --permissions view_users --id $(hammer filter list | grep clouduser_views | awk '{print   $1}')
 ```
-   * Your filters should look something like this when you're done, this can also be done in the Foreman UI as well.
+   * Your filters should look something like this when you're done, this can also be done in the Foreman UI as well if you have problems with CLI.
+
+   * `clouduser_views` role filter
+
+![clouduser_rbac2](../image/cloud_rbac2.png?raw=true)
+
+   * `clouduser_hosts` role filter
 
 ![clouduser_rbac](../image/cloud_rbac.png?raw=true)
 
    * Next create your `cloudusers` generic group and tie it all together
 ```
-hammer user-group create --name cloudusers --roles clouduser_views
+hammer user-group create --name cloudusers --roles clouduser_views clouduser_hosts
 ```
    * Lastly, add all your existing cloud users as members of this group (we use 32 cloud users in this example)
 ```
 for clouduser in $(seq 1 9); do hammer user-group add-user --name cloudusers --user cloud0$clouduser; done
 for clouduser in $(seq 10 32); do hammer user-group add-user --name cloudusers --user cloud$clouduser; done
 ```
+
+   * You should see the `cloudusers` group now have the following roles added above:
+
+![clouduser_rbac3](../image/cloud_rbac3.png?raw=true)
+
+   * In order for non-admin environment users (e.g. cloud02, cloud03) to see only their hosts the hosts simply need to have their ownership changed to that respective cloud user. [foreman_heal.py](https://github.com/redhat-performance/quads/blob/master/quads/tools/foreman_heal.py) will take care of this for you, we typically run this every 3 hours outside of [cron](https://github.com/redhat-performance/quads/blob/master/cron/quads#L45).  This will both setup system ownership as well as fix inconsistencies if they exist when run.
+
+   * If you'd prefer to manage this yourself with `hammer cli` then we're just running the equivalent of `hammer host update --name host01.example.com --owner newcloudusername`
 
 ### Adding New QUADS Host IPMI
 
@@ -269,7 +285,7 @@ ipmitool -I lanplus -H mgmt-<hostname> -U ADMIN -P ADMIN channel setaccess 1 3 i
 
 ```
 ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> user set name 4 quads
-ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> user set password 4 quads
+ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> user set password 4 quadspassword
 ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> user priv 4 0x4
 ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> user enable 4
 ipmitool -I lanplus -H mgmt-<hostname> -U root -P <pw> channel setaccess 1 4 ipmi=on

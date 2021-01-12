@@ -42,31 +42,45 @@ QUADS automates the future scheduling, end-to-end provisioning and delivery of b
             * [Optional QUADS Public VLAN](#optional-quads-public-vlan)
             * [Defining a New Cloud](#defining-a-new-cloud)
             * [Adding New Hosts to your Cloud](#adding-new-hosts-to-your-cloud)
+         * [Managing Faulty Hosts](#managing-faulty-hosts)
+            * [Migrating to QUADS-managed Host Health](#migrating-to-quads-managed-host-health)
          * [Extending the <strong>Schedule</strong> of an Existing Cloud](#extending-the-schedule-of-an-existing-cloud)
-         * [Extending the <strong>Schedule</strong> of Existing Cloud with Differing Active Schedules](#extending-the-schedule-of-existing-cloud-with-differing-active-schedules)
+         * [Extending the <strong>Schedule</strong> of a Specific Host](#extending-the-schedule-of-a-specific-host)
+         * [Shrinking the <strong>Schedule</strong> of an Existing Cloud](#shrinking-the-schedule-of-an-existing-cloud)
+         * [Shrinking the <strong>Schedule</strong> of a Specific Host](#shrinking-the-schedule-of-a-specific-host)
+         * [Terminating a <strong>Schedule</strong>](#terminating-a-schedule)
          * [Adding Hosts to an existing Cloud](#adding-hosts-to-an-existing-cloud)
          * [Removing a Schedule](#removing-a-schedule)
          * [Removing a Schedule across a large set of hosts](#removing-a-schedule-across-a-large-set-of-hosts)
          * [Removing a Host from QUADS](#removing-a-host-from-quads)
       * [Using the QUADS JSON API](#using-the-quads-json-api)
       * [Additional Tools and Commands](#additional-tools-and-commands)
+         * [Modifying Cloud-level Attributes](#modifying-cloud-level-attributes)
          * [Looking into the Future](#looking-into-the-future)
          * [Dry Run for Pending Actions](#dry-run-for-pending-actions)
          * [Find Free Cloud Environment](#find-free-cloud-environment)
          * [Find Available Hosts](#find-available-hosts)
+            * [Find Available Hosts based on Hardware or Model](#find-available-hosts-based-on-hardware-or-model)
+            * [Find Available Web Preview](#find-available-web-preview)
+            * [Find a System by MAC Address](#find-a-system-by-mac-address)
       * [Interacting with MongoDB](#interacting-with-mongodb)
          * [Example: Get hosts by switch port and switch ip](#example-get-hosts-by-switch-port-and-switch-ip)
          * [Example: Change the wipe value in MongoDB](#example-change-the-wipe-value-in-mongodb)
          * [Example: Querying Notification Values in MongoDB](#example-querying-notification-values-in-mongodb)
          * [Example: Query Multiple Values in MongoDB inside Collections](#example-query-multiple-values-in-mongodb-inside-collections)
+         * [Example: Manually Validate Hosts](#example-manually-validate-hosts)
          * [Example: Manually moving a Host Cloud in MongoDB](#example-manually-moving-a-host-cloud-in-mongodb)
          * [Example: Toggling Individual Cloud Metadata Settings](#example-toggling-individual-cloud-metadata-settings)
+         * [Example: Modifying cc-users](#example-modifying-cc-users)
+         * [Example: Removing Cloud Public VLAN Associations in MongoDB](#example-removing-cloud-public-vlan-associations-in-mongodb)
       * [Backing up QUADS](#backing-up-quads)
       * [Restoring QUADS DB from Backup](#restoring-quads-db-from-backup)
       * [Troubleshooting Validation Failures](#troubleshooting-validation-failures)
          * [Understanding Validation Structure](#understanding-validation-structure)
          * [Troubleshooting Steps](#troubleshooting-steps)
          * [Validation using Debug Mode](#validation-using-debug-mode)
+         * [Skipping Past Foreman Validation](#skipping-past-foreman-validation)
+         * [Mapping Internal VLAN Interfaces to Problem Hosts](#mapping-internal-vlan-interfaces-to-problem-hosts)
       * [QUADS Talks and Media](#quads-talks-and-media)
 
 ## What does it do?
@@ -75,6 +89,7 @@ QUADS automates the future scheduling, end-to-end provisioning and delivery of b
    - Automated network and provisioning validation prior to delivering sets of machines/networks to tenants
    - Automated allocation of optional, publicly routable VLANs
    - Generates/maintains user-configurable [instackenv.json](https://docs.openstack.org/tripleo-docs/latest/install/environments/baremetal.html#instackenv-json) to accomodate OpenStack deployment.
+   - Generates/maintains user-configurable ocpinventory.json for OpenShift on Baremetal Deployments
    - Automatically generate/maintain documentation to illustrate current status, published to a [Wordpress instance](http://python-wordpress-xmlrpc.readthedocs.io/en/latest/examples/posts.html#pages)
      * Current system details, infrastructure fleet inventory
      * Current system group ownership (cloud), workloads and assignments
@@ -111,15 +126,17 @@ QUADS automates the future scheduling, end-to-end provisioning and delivery of b
 
 | Step | Documentation | Details |
 |------|---------------|---------|
+| General Architecture Overview | [docs](/docs/quads-workflow.md) | Architecture overview |
 | Install and Setup Foreman/Satellite | [docs](https://theforeman.org/manuals/nightly/#3.InstallingForeman) | Not covered here |
-| Prepare Host and Network Environment | [docs](/docs/quads-workflow.md) | Covers Juniper Environments |
+| Setup Foreman/Satellite Validation Templates | [examples](/templates/README.md) | Templates for internal interface configs |
+| Prepare Host and Network Environment | [docs](/docs/switch-host-setup.md) | Covers Juniper Environments, IPMI, Foreman |
 | Install QUADS | [docs](#installing-quads) | RPM, Docker or Github Source |
-| Install MongoDB | [docs](docs/install-mongodb.md) | May not be available via your distribution due to licensing changes |
+| Install MongoDB | [docs](/docs/install-mongodb.md) | May not be available via your distribution due to licensing changes |
 | Install Wiki | [docs](#installing-other-quads-components) | For RPM or Github Source only |
 | Configure your QUADS Move Command | [docs](#quads-move-command) | Configure your provisioning and move actions |
 | Configure QUADS Crons | [docs](#making-quads-run) |  Tell QUADS how to manage your infrastructure |
 | Add Clouds and Hosts | [docs](#adding-new-hosts-to-quads) | Configure your hosts and environments in QUADS |
-
+| Host Metadata Model and Search | [docs](/docs/quads-host-metadata-search.md) | Host metadata info and filtering |
 
 ## QUADS Workflow
 
@@ -227,9 +244,13 @@ systemctl start quads-server.service
    - We build RPM packages for Fedora and CentOS/RHEL 8
    - On Fedora 30 and above you'll need to manually install mongodb first, see [installing mongodb for QUADS](docs/install-mongodb.md)
    - On Fedora 30 and above it is necessary to install `python3-wordpress-xmlrpc` as it is not included anymore
+
 ```
-dnf install http://download-ib01.fedoraproject.org/pub/fedora/linux/releases/29/Everything/x86_64/os/Packages/p/python3-wordpress-xmlrpc-2.3-13.fc29.noarch.rpm
+wget https://funcamp.net/w/python3-wordpress-xmlrpc-2.3-13.fc29.noarch.rpm
+rpm -ivh --nodeps python3-wordpress-xmlrpc-2.3-13.fc29.noarch.rpm
 ```
+This package is also available via `pip` via `pip install python-wordpress-xmlrpc`
+
    - On RHEL/CentOS 8 you'll need to install MongoDB first via `dnf install mongodb mongodb-server`
    - On RHEL/CentOS 8 you'll also need to satisfy `python3-paramiko` RPM package from somewhere as it's been removed from EL8 in lieu of `libssh`
 
@@ -405,6 +426,21 @@ cloud01 : 45 (Primary Cloud Environment)
 cloud02 : 0 (02 Cloud Environment)
 cloud03 : 0 (03 Cloud Environment)
 ```
+   - For a more detailed summary of current system allocations use `--detail`
+
+```
+quads-cli --summary --detail
+```
+```
+cloud01 (quads): 45 (Primary Cloud Environment) - 451
+cloud02 (jdoe): 0 (02 Cloud Environment) - 462
+cloud03 (jhoffa): 0 (03 Cloud Environment) - 367
+```
+**NOTE:**
+
+The format here is based on the following:
+`{cloud_name} ({owner}): {count} ({description}) - {ticket_number}`
+
    - Define a custom schedule for a host
      - Example: assign host ```c08-h21``` to the workload/cloud ```cloud02```
 
@@ -453,8 +489,10 @@ In the above example the default move command called ```/bin/echo``` for illustr
 * Runs against all hosts according to the QUADS schedule.
 
 ```
-quads-cli --move-hosts --path-to-command quads/tools/move_and_rebuild_hosts.py
+quads-cli --move-hosts --move-command quads/tools/move_and_rebuild_hosts.py
 ```
+
+* You can modify the default settings via the `default_move_command` setting in [quads-cli](https://github.com/redhat-performance/quads/blob/master/bin/quads-cli).
 
 * You can look at the [move-and-rebuild-hosts](https://github.com/redhat-performance/quads/blob/master/quads/tools/move_and_rebuild_hosts.py) script as an example.  It's useful to note that with `quads/tools/             move_and_rebuild_hosts.py` passing a fourth argument will result in only the network automation running and the actual host provisioning will be skipped.  You should review this script and adapt it to your needs, we try to make variables for everything but some assumptions are made to fit our running environments.
 
@@ -516,11 +554,23 @@ Creating a new schedule and assigning machines is currently done through the QUA
 
 This pertains to the internal interfaces that QUADS will manage for you to move sets of hosts between environments based on a schedule.  For setting up optional publicly routable VLANS please see the [QUADS public vlan setup steps](/docs/switch-host-setup.md#define-optional-public-vlans)
 
-   -  VLAN design (optional, will default to `qinq: false` below)
+   -  VLAN design (optional, will default to `qinq: 0` below)
 
-   - ```qinq: false``` (default) qinq VLAN separation by interface: primary, secondary and beyond QUADS-managed interfaces all match the same VLAN membership across other hosts in the same cloud allocation.  Each interface per host is in its own VLAN, and these match across the rest of your allocated hosts by interface (all nic1, all nic2, all nic3, all nic4 etc).
+   - ```qinq: 0``` (default) qinq VLAN separation by interface: primary, secondary and beyond QUADS-managed interfaces all match the same VLAN membership across other hosts in the same cloud allocation.  Each interface per host is in its own VLAN, and these match across the rest of your allocated hosts by interface (all nic1, all nic2, all nic3, all nic4 etc).
 
-   - ```qinq: true``` all QUADS-managed interfaces in the same qinq VLAN. For this to take effect you need to pass the optional argument of `--qinq` to the `--define-cloud` command.
+   - ```qinq: 1``` all QUADS-managed interfaces in the same qinq VLAN. For this to take effect you need to pass the optional argument of `--qinq 1` to the `--define-cloud` command.
+
+   - You can use the command `quads-cli --ls-qinq` to view your current assignment VLAN configuration:
+
+```
+quads-cli --ls-qinq
+```
+```
+cloud01: 0 (Isolated)
+cloud02: 1 (Combined)
+cloud03: 0 (Isolated)
+cloud04: 1 (Combined)
+```
 
 #### Optional QUADS Public VLAN ####
 
@@ -537,8 +587,10 @@ if you need to clear the vlan association with your cloud, rerun your command an
 #### Defining a New Cloud ####
 
 ```
-quads-cli --define-cloud cloud03 --description "Messaging AMQ" --force --cloud-owner epresley --cc-users "jdoe jhoffa" --cloud-ticket 423625 --qinq
+quads-cli --define-cloud cloud03 --description "Messaging AMQ" --force --cloud-owner epresley --cc-users "jdoe jhoffa" --cloud-ticket 423625 --qinq 1
 ```
+
+   * Note: in QUADS `1.1.4` you can change any of these values selectively via the `--mod-cloud` command [described below](#modifying-cloud-level-attributes).
 
    - Now that you've defined your new cloud you'll want to allocate machines and a schedule.
      - We're going to find the first 20 Dell r620's and assign them as an example.
@@ -567,103 +619,125 @@ After your hosts are provisioned and moved you should see them populate under th
 quads-cli --cloud-only cloud03
 ```
 
+### Managing Faulty Hosts
+Starting with `1.1.4` QUADS can manage broken or faulty hosts for you and ensure they are ommitted from being added to a future schedule or listed as available.  Prior to `1.1.4` this is managed via the Foreman host parameter `broken_state` (true/false).
+
+* Listing all broken systems.
+```
+# quads-cli --ls-broken
+f18-h22-000-r620.stage.example.com
+```
+
+* Marking a system as faulty
+```
+# quads-cli --mark-broken --host f18-h23-000-r620.example.com
+Host f18-h23-000-r620.example.com is now marked as broken
+```
+
+* Marking a system as repaired or no longer faulty.
+```
+# quads-cli --mark-repaired --host f18-h23-000-r620.example.com
+Host f18-h23-000-r620.example.com is now marked as repaired.
+```
+
+* Hosts marked as faulty will be ommitted from `--ls-available`
+* Hosts marked as faulty are not able to be scheduled until they are marked as repaired again.
+
+#### Migrating to QUADS-managed Host Health
+
+* If you previously used the `broken_state` Foreman host parameter to manage your broken or out-of-service systems within your fleet you'll want to migrate to using the new methodology of the QUADS database handling this for you for versions `1.1.4` and higher.
+* You can use the following command to query Foreman and convert `broken_state` host parameters and status into QUADS:
+
+```
+for h in $(hammer host list --per-page 1000 --search params.broken_state=true | grep $(egrep ^domain /opt/quads/conf/quads.yml | awk '{ print $NF }') | awk '{ print $3 }') ; do quads-cli --mark-broken --host $h ; done
+```
+
 ### Extending the __Schedule__ of an Existing Cloud
 
 Occasionally you'll want to extend the lifetime of a particular assignment. QUADS lets you do this with one command but you'll want to double-check things first.
-In this example we'll be extending the assignment end date for cloud03
+In this example we'll be extending the assignment end date for cloud02
 
-   - First, get the updated list of current assignments
-
-```
-quads-cli --summary
-```
-```
-cloud01 : 55 (Pool of available servers)
-cloud02 : 12 (Small OSPD deployment)
-cloud03 : 20 (Messaging - AMQ - dispatch router and artemis broker)
-cloud04 : 60 (Ceph deployment)
-cloud07 : 10 (Small OSPD deployment)
-cloud09 : 5 (Keystone OSPD deployment)
-cloud10 : 14 (Openshift + OSPD testing)
-```
-
-   - Next, List the owners of the clouds.
+In QUADS version `1.1.4` or higher or the current `master` branch you can extend a cloud environment with a simple command.
 
 ```
-quads-cli --ls-owner
-```
-```
-cloud01 : nobody
-cloud02 : bjohnson
-cloud03 : jhoffa
-cloud04 : ltorvalds
-cloud05 : nobody
-cloud06 : nobody
-cloud07 : dtrump
-cloud08 : nobody
-cloud09 : dtrump
-cloud10 : cnorris
+quads-cli --extend --cloud cloud02 --weeks 2 --check
 ```
 
-   - Lastly, obtain a list of the current machines in cloud03
+This will check whether or not the environment can be extended without conflicts.
+
+To go ahead and extend it remove the `--check`
 
 ```
-quads-cli --cloud-only cloud03
-```
-```
-b09-h01-r620.rdu.openstack.example.com
-b09-h02-r620.rdu.openstack.example.com
-b09-h03-r620.rdu.openstack.example.com
-b09-h05-r620.rdu.openstack.example.com
-b09-h06-r620.rdu.openstack.example.com
-b09-h07-r620.rdu.openstack.example.com
-b09-h09-r620.rdu.openstack.example.com
-b09-h11-r620.rdu.openstack.example.com
-b09-h14-r620.rdu.openstack.example.com
-b09-h15-r620.rdu.openstack.example.com
-b09-h17-r620.rdu.openstack.example.com
-b09-h18-r620.rdu.openstack.example.com
-b09-h19-r620.rdu.openstack.example.com
+quads-cli --extend --cloud cloud02 --weeks 2
 ```
 
-   - Take a look at the existing schedule for one of these machines, you'll see it expires 2016-10-30.
+### Extending the __Schedule__ of a Specific Host
+
+You might also want to extend the lifetime of a specific host.
+In this example we'll be extending the assignment end date for host01.
 
 ```
-quads-cli --host b09-h01-r620.rdu.openstack.example.com --ls-schedule
-```
-```
-Default cloud: cloud01
-Current cloud: cloud03
-Current schedule: 0
-Defined schedules:
-  0| start=2016-10-17 00:00,end=2016-10-30 18:00,cloud=cloud03
+quads-cli --extend --host host01 --weeks 2 --check
 ```
 
-   - Extend the ```--schedule-end``` date for the Cloud
+This will check whether or not the environment can be extended without conflicts.
 
-If you are sure you've got the right cloud assignment from above you can proceed
-This is the actual command that extends the schedule, the other commands above are more for your verification.
-Below we will be extending the schedule end date from 2016-10-30 to 2016-11-27 at 18:00
+To go ahead and extend it remove the `--check`
 
 ```
-for h in $(quads-cli --cloud-only cloud03) ; do quads-cli --host $h --mod-schedule 0 --schedule-end "2016-11-27 18:00"; done
+quads-cli --extend --host host01 --weeks 2
 ```
 
-### Extending the __Schedule__ of Existing Cloud with Differing Active Schedules
+### Shrinking the __Schedule__ of an Existing Cloud
 
-When in heavy usage some machines primary, active schedule may differ from one another, e.g. 0 versus 1, versus 2, etc.  Because schedules operate on a per-host basis sometimes the same schedule used within a cloud may differ in schedule number.  Here's how you modify them across the board for the current active schedule if the ID differs.
-
-* Example: extend all machines in cloud10 to end on 2019-03-06 22:00 UTC (they previously would end 2019-02-09 22:00)
-* These have differing primary active schedule IDs.
-
-  - Check your commands via echo first
-  - Reschedule against a certain cloud **and** start date
+Occasionally you'll want to shrink the lifetime of a particular assignment.
+In this example we'll be shrinking the assignment end date for cloud02
 
 ```
-for h in $(quads-cli --cloud-only cloud05); do echo quads-cli --mod-schedule $(quads-cli --ls-schedule --host $h | grep cloud05 | grep "end=2019-02-09" | tail -1 | awk -F\| '{ print $1 }') --host $h --schedule-end "2019-03-06 22:00" ; done
+quads-cli --shrink --cloud cloud02 --weeks 2 --check
 ```
 
-  * If all looks good you can remove **remove the echo lines** and apply.
+This will check whether or not the environment can be shrunk without conflicts.
+
+To go ahead and shrink it remove the `--check`
+
+```
+quads-cli --shrink --cloud cloud02 --weeks 2
+```
+
+### Shrinking the __Schedule__ of a Specific Host
+
+You might also want to shrink the lifetime of a specific host.
+In this example we'll be shrinking the assignment end date for host01.
+
+```
+quads-cli --shrink --host host01 --weeks 2 --check
+```
+
+This will check whether or not the host schedule can be shrunk without conflicts.
+
+To go ahead and shrink it remove the `--check`
+
+```
+quads-cli --shrink --host host01 --weeks 2
+```
+
+### Terminating a __Schedule__
+
+If you would like to terminate the lifetime of a schedule at either a host or cloud level, you can pass the `--now` argument instead of `--weeks` which will set the schedules end date to now.
+In this example we'll be terminating the assignment end date for cloud02.
+
+```
+quads-cli --shrink --cloud cloud02 --now --check
+```
+
+This will check whether or not the environment can be terminated without conflicts.
+
+To go ahead and terminate it remove the `--check`
+
+```
+quads-cli --shrink --cloud cloud02 --now
+```
 
 ### Adding Hosts to an existing Cloud
 
@@ -735,6 +809,26 @@ Removed: {'host': 'f03-h30-000-r720xd.rdu2.example.com'}
 
 ## Additional Tools and Commands
 
+### Modifying Cloud-level Attributes
+* You can re-define or change any aspects of an already-defined cloud starting in `1.1.4` with the `--mod-cloud` command.
+* This can be done a per-parameter or combined basis:
+
+```
+quads-cli --mod-cloud cloud02 --cloud-owner jhoffa
+```
+
+```
+quads-cli --mod-cloud cloud04 --cc-users "tpetty fmercury"
+```
+
+```
+quads-cli --mod-cloud cloud06 --vlan 604 --wipe
+```
+
+```
+quads-cli --mod-cloud cloud50 --no-wipe
+```
+
 ### Looking into the Future
 * Because QUADS knows about all future schedules you can display what your environment will look like at any point in time using the `--date` command.
 
@@ -804,8 +898,40 @@ quads-cli --ls-available --schedule-start "2019-12-05 08:00" --schedule-end "201
 quads --ls-available --schedule-end "2019-06-02 22:00"
 ```
 
+#### Find Available Hosts based on Hardware or Model
+
+* In QUADS `1.1.4` and higher you can now filter your availability search based on hardware capabilities or model type.
+* Using this feature requires [importing hardware metadata](/docs/quads-host-metadata-search.md#how-to-import-host-metadata)
+* Example below using `--filter "model==1029U-TRTP"`
+
+```
+quads-cli --ls-available --schedule-start "2020-08-02 22:00" --schedule-end "2020-08-16 22:00" --filter "model==1029U-TRTP"
+```
+
+#### Find Available Web Preview
+
+* We now have a Flask-based `--ls-available` web interface available on `quadshost:5001` if your firewall rules are open for `TCP/5001`.
+* Available in QUADS `1.1.4` or above as a tech preview (when we migrate fully to Flask this will be supplanted with a full UI).
+* This is provided via the `quads-web` systemd service or you can run it manually via `cd /opt/quads/web ; python3 main.py`
+* You will need to seed the `models` data for your systems using the new [host metadata feature](/docs/quads-host-metadata-search.md)
+* This is **not** available in containers as it's a tech preview but will be featured once our move from CherryPy to Flask is completed later.
+
+![quads-available-web](/image/quads-available-web.png?raw=true)
+
+* Control + click can select more than one model
+* Not selecting a model assumes a search for anything available.
+
+#### Find a System by MAC Address
+* You can utilize the new metadata model and `--filter` command in `1.1.4` and above along with `--ls-hosts` to search for a system by MAC Address.
+
+```
+quads-cli --ls-hosts --filter "interfaces.mac_address==ac:1f:6b:2d:19:48"
+```
+
 ## Interacting with MongoDB
 * In some scenarios you may wish to interrogate or modify values within MongoDB.  You should be careful doing this and have good backups in place.  Generally, we will try to implement data, object and document modification needs through quads-cli so you don't need to do this but sometimes it's useful for troubleshooting or other reasons.
+
+* **NOTE**: For most of the below examples usage of `quads-cli --mod-cloud` supplants the need for making any changes in MongoDB post QUADS version `1.1.4`.  We'll leave these examples below for posterity or in the case they can be modeled to do something else useful otherwise.
 
 * Example:  Toggling the `wipe:` cloud value that determines whether new systems entering an environment should be reprovisioned or not.  In this example `cloud02` has the value of `wipe: 0` and we want to change this within Mongodb.
 
@@ -841,7 +967,7 @@ switched to db quads
 
 ```
 > db.cloud.find({name: "cloud02"})
-{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : true, "wipe" : false, "ccuser" : [ "psuriset" ], "provisioned" : true }
+{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : 0, "wipe" : false, "ccuser" : [ "psuriset" ], "provisioned" : true }
 ```
 
    - We want to change `wipe: false` to `wipe: true`
@@ -855,7 +981,7 @@ WriteResult({ "nMatched" : 1, "nUpserted" : 0, "nModified" : 1 })
 
 ```
 > db.cloud.find({name:"cloud02"})
-{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : true, "wipe" : true, "ccuser" : [ "psuriset" ], "provisioned" : true }
+{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : 0, "wipe" : true, "ccuser" : [ "psuriset" ], "provisioned" : true }
 ```
 
    - Above, we can see this value was changed.
@@ -905,6 +1031,23 @@ db.notification.find({cloud:ObjectId("5c82b3690f767d000692acff"), ticket: "49173
 { "_id" : ObjectId("5d03b161913706625477d581"), "cloud" : ObjectId("5c82b3690f767d000692acff"), "ticket" : "491731", "fail" : false, "success" : true, "initial" : true, "pre_initial" : true, "pre" : false, "one_day" : false, "three_days" : false, "five_days" : false, "seven_days" : false }
 ```
 
+### Example: Manually Validate Hosts
+* If there's systems you want to quickly pass through QUADS validation you can set `validated: true` in Mongo to release them.
+
+* Check the `validated` flag
+
+```
+db.host.find({name: "f20-h01-000-5039ms.example.com"})
+```
+
+* Set `validated` to true.
+
+```
+db.host.update({name:"f20-h01-000-5039ms.example.com"}, {$set:{validated:true}})
+```
+
+* Re-running `/opt/quads/quads/tools/validate_env.py` should pass the systems.
+
 ### Example: Manually moving a Host Cloud in MongoDB
 
 * Sometimes (hopefully rarely) you may need to move a host manually from one cloud to another, this is done by updating the `cloud:ObjectId` for the host object within MongoDB.
@@ -924,7 +1067,7 @@ Above, we will move those two hosts manually inside MongoDB.
 ```
 > use quads
 > db.cloud.find({name: "cloud02"})
-{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : true, "wipe" : true, "ccuser" : [ "psuriset" ], "provisioned" : true }
+{ "_id" : ObjectId("5c82b3660f767d000692acf7"), "notified" : true, "validated" : true, "released" : true, "name" : "cloud02", "description" : "EL7 to EL8 Satellite Upgrade", "owner" : "ikaur", "ticket" : "490957", "qinq" : 0, "wipe" : true, "ccuser" : [ "psuriset" ], "provisioned" : true }
 ```
 
    - Next, update the hosts document metadata within MongoDB to match the destination cloud.
@@ -957,6 +1100,24 @@ If you really need to manually toggle individual cloud metadata settings this is
 ```
 db.cloud.update({name:"cloud21"}, {$set:{validated:true}})
 ```
+
+### Example: Modifying cc-users
+
+If a future cloud is defined and scheduled with future hosts you will currently not be able to redefine it with `--define-cloud --force` to either append or remove `cc-users`.  To do this in MongoDB you can adjust it like so:
+
+```
+db.cloud.update({name:"cloud07"}, {$set:{ccuser:["kreeves", "gcarlin", "bmurray", "mhedberg"]}})
+```
+
+### Example: Removing Cloud Public VLAN Associations in MongoDB
+
+If you need to remove a defined VLAN from an existing or newly defined cloud you will need to use MongoDB for now until `--mod-cloud` does this for you.  Note that you can **add** an optional public VLAN association at any time via `--mod-cloud --vlan vlanid` but **removing** this association must for now be done in MongoDB.
+
+```
+ db.cloud.update({name:"cloud02"}, {$set:{vlan:null}})
+```
+
+After adding or removing VLAN assocations you should run `/opt/quads/quads/tools/verify_switchconf.py --cloud cloud02` to check/modify any further switchport changes that might be required with the addition or removal of an optional public VLAN.
 
 ## Backing up QUADS
 
@@ -1143,6 +1304,35 @@ ICMP Host Unreachable from 10.1.38.126 for ICMP Echo sent to f12-h14-000-1029u.r
 
 ICMP Host Unreachable from 10.1.38.126 for ICMP Echo sent to f12-h14-000-1029u.rdu2.scalelab.example.com (10.1.38.43)
 ```
+
+### Skipping Past Foreman Validation
+
+* If you know your systems are built you can force `validate_env.py` to move into the network portions of the validation by toggling the `provisioned` attribute in MongoDB for your cloud object.
+
+```
+db.cloud.update({"name": "cloud23"}, {$set:{'provisioned':true}}
+```
+
+### Mapping Internal VLAN Interfaces to Problem Hosts
+You might have noticed that we configure our [Foreman](https://github.com/redhat-performance/quads/tree/master/templates/foreman) templates to drop `172.{16,17,18,19}.x` internal VLAN interfaces which correspond to the internal, QUADS-managed multi-tenant interfaces across a set of hosts in a cloud assignment.
+
+The _first two octets_ here can be substituted by the _first two octets of your systems public network_ in order to determine from `validate_env.py --debug` which host internal interfaces have issues or are unreachable.
+
+![validation_1](/image/troubleshoot_validation1.png?raw=true)
+
+* Above, we can run the `host` command to determine what these machines map to by substituting `10.1` for the first two octects:
+
+```
+# for host in 10.1.37.231 10.1.38.150; do host $host; done
+231.37.1.10.in-addr.arpa domain name pointer e17-h26-b04-fc640.example.com.
+150.38.1.10.in-addr.arpa domain name pointer e17-h26-b03-fc640.example.com.
+```
+
+* Below you can see the code that maintains this mapping and assumptions:
+
+![validation_2](/image/troubleshoot_validation2.png?raw=true)
+
+This mapping feeds into our [VLAN network validation code](https://github.com/redhat-performance/quads/blob/master/quads/tools/validate_env.py#L143)
 
 ## QUADS Talks and Media
 [![Skynet your Infrastructure with QUADS @ EuroPython 2017](http://img.youtube.com/vi/9e1ZhtBliHc/0.jpg)](https://www.youtube.com/watch?v=9e1ZhtBliHc "Skynet your Infrastructure with QUADS")

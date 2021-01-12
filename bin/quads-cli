@@ -17,10 +17,13 @@
 import argparse
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import functools
 import logging
 from collections import defaultdict
+
+import yaml
+from mongoengine import InvalidQueryError
 from requests.exceptions import ConnectionError
 
 import requests
@@ -35,7 +38,7 @@ from quads.helpers import first_day_month, last_day_month
 from quads.quads import Api as QuadsApi
 from quads.tools import reports
 from quads.tools.move_and_rebuild_hosts import move_and_rebuild, switch_config
-from quads.model import Cloud, Schedule, Host
+from quads.model import Cloud, Schedule, Host, Disk, Interface, Notification, Vlan
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler(sys.stdout))
@@ -47,24 +50,86 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 def output_json_result(request, data):
     try:
         if request.status_code == 204:
-            logger.info('Removed: %s' % data)
+            logger.info("Removed: %s" % data)
         else:
             js = request.json()
-            logger.debug('%s %s: %s' % (request.status_code, request.reason, data))
-            for result in js['result']:
+            logger.debug("%s %s: %s" % (request.status_code, request.reason, data))
+            for result in js["result"]:
                 if type(result) == list:
                     for line in result:
                         logger.info(line)
                 else:
                     logger.info(result)
     except JSONDecodeError:
-        logger.error('Could not parse json reply.')
+        logger.error("Could not parse json reply.")
         logger.debug(request.text)
         exit(1)
 
 
 def exception_handler(loop, context):
     logger.error(f"Caught exception: {context['message']}")
+
+
+def filter_kwargs(filter_args):
+    kwargs = {}
+    ops = {
+        "==": "",
+        "!=": "__ne",
+        "<": "__lt",
+        "<=": "__lte",
+        ">": "__gt",
+        ">=": "__gte",
+    }
+    conditions = filter_args.split(",")
+    for condition in conditions:
+        op_found = False
+        for op, op_suffix in ops.items():
+            if op in condition:
+                op_found = True
+                k, v = condition.split(op)
+                keys = k.split(".")
+
+                try:
+                    value = int(v)
+                except ValueError:
+                    value = v
+
+                if keys[0].strip().lower() in ["disks", "interfaces"]:
+
+                    key = f"{keys[0].strip()}__match"
+                    condition_dict = {
+                        f"{'__'.join(keys[1:])}{op_suffix}".strip(): value
+                    }
+                    if kwargs.get(key, False):
+                        kwargs[key].update(condition_dict)
+                    else:
+                        kwargs[key] = condition_dict
+                else:
+                    if keys[0].strip().lower() == "model":
+                        if value.upper() not in conf["models"].split(","):
+                            logger.error("Model type not recognized.")
+                            logger.warning(
+                                f"Accepted model names are: {conf['models']}"
+                            )
+                            exit(1)
+                    if type(value) == str:
+                        value = value.upper()
+                    query = {f"{'__'.join(keys)}{op_suffix}": value}
+                    kwargs.update(query)
+                break
+        if not op_found:
+            logger.error(
+                "A filter was defined but not parsed correctly. Check filter operator."
+            )
+            logger.warning(f"Condition: {condition}")
+            logger.warning(f"Accepted operators: {', '.join(ops.keys())}")
+            exit(1)
+    if not kwargs:
+        logger.error(
+            "A filter was defined but not parsed correctly. Check filter syntax."
+        )
+        exit(1)
+    return kwargs
 
 
 def main(_args):
@@ -78,53 +143,86 @@ def main(_args):
         if _args.host:
             _kwargs["host"] = _args.host
         if _args.datearg:
-            _kwargs["date"] = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M').isoformat()
+            _kwargs["date"] = datetime.strptime(
+                _args.datearg, "%Y-%m-%d %H:%M"
+            ).isoformat()
 
-        if _args.action in ['owner', 'ticket', 'qinq', 'wipe', 'ccuser']:
+        if _args.action in ["owner", "ticket", "qinq", "wipe", "ccuser"]:
             try:
                 data = quads.get(_args.action)
             except ConnectionError:
-                logger.error("Could not connect to the quads-server, verify service is up and running.")
+                logger.error(
+                    "Could not connect to the quads-server, verify service is up and running."
+                )
                 exit(1)
             if data:
                 for k in data:
                     if isinstance(k[_args.action], list):
-                        logger.info(str(k['name']) + ": " + str(", ".join(k[_args.action])))
+                        logger.info(
+                            str(k["name"]) + ": " + str(", ".join(k[_args.action]))
+                        )
                     else:
-                        logger.info(str(k['name']) + ": " + str(k[_args.action]))
+                        logger.info(str(k["name"]) + ": " + str(k[_args.action]))
                 exit(0)
 
-        if _args.action == 'interface':
+        if _args.action == "broken":
+            _hosts = Host.objects(broken=True)
+            for host in _hosts:
+                logger.info(host.name)
+
+            exit(0)
+
+        if _args.action == "interface":
             if _args.host is None:
-                logger.error('Missing option. --host option is required for --ls-interface:')
+                logger.error(
+                    "Missing option. --host option is required for --ls-interface:"
+                )
                 exit(1)
 
             _host = Host.objects(name=_args.host).first()
             if not _host:
-                logger.error('Host %s does not exist' % _args.host)
+                logger.error("Host %s does not exist" % _args.host)
                 exit(1)
 
             try:
                 data = quads.get_interfaces(**_kwargs)
             except ConnectionError:
-                logger.error("Could not connect to the quads-server, verify service is up and running.")
+                logger.error(
+                    "Could not connect to the quads-server, verify service is up and running."
+                )
                 exit(1)
             if data:
-                result = [json.loads(entry) for entry in data['result']]
-                for interface in sorted(result, key=lambda k: k['name']):
-                    message = \
-                        f"interface: {interface['name']}, " \
-                        f"mac address: {interface['mac_address']}, " \
-                        f"switch IP: {interface['ip_address']}, " \
+                result = [json.loads(entry) for entry in data["result"]]
+                for interface in sorted(result, key=lambda k: k["name"]):
+                    message = (
+                        f"interface: {interface['name']}, "
+                        f"mac address: {interface['mac_address']}, "
+                        f"switch IP: {interface['ip_address']}, "
                         f"port: {interface['switch_port']}"
+                    )
                     logger.info(message)
             exit(0)
 
-        if _args.action == 'schedule':
+        if _args.action == "ls_vlan":
+            _vlans = Vlan.objects().all()
+            if not _vlans:
+                logger.error("No VLANs defined")
+                exit(1)
+
+            for vlan in _vlans:
+                _cloud = Cloud.objects(vlan=vlan).first()
+                cloud_assigned = "Free"
+                if _cloud:
+                    cloud_assigned = _cloud.name
+                logger.info(f"{vlan.vlan_id}: {cloud_assigned}")
+
+            exit(0)
+
+        if _args.action == "schedule":
             if _args.host:
                 _host = Host.objects(name=_args.host).first()
                 if not _host:
-                    logger.error('Host %s does not exist' % _args.host)
+                    logger.error("Host %s does not exist" % _args.host)
                     exit(1)
 
                 _kwargs["host"] = _host
@@ -148,11 +246,8 @@ def main(_args):
                         start = str(schedule.start)[:-3]
                         end = str(schedule.end)[:-3]
                         logger.info(
-                            "%s| start=%s, end=%s, cloud=%s" % (
-                                schedule["index"],
-                                start,
-                                end,
-                                _cloud_name)
+                            "%s| start=%s, end=%s, cloud=%s"
+                            % (schedule["index"], start, end, _cloud_name)
                         )
             else:
                 _clouds = Cloud.objects()
@@ -168,7 +263,9 @@ def main(_args):
                             try:
                                 available_hosts = quads.get_available(**data)
                             except ConnectionError:
-                                logger.error("Could not connect to the quads-server, verify service is up and running.")
+                                logger.error(
+                                    "Could not connect to the quads-server, verify service is up and running."
+                                )
                                 exit(1)
 
                             for host in available_hosts:
@@ -181,7 +278,9 @@ def main(_args):
                         try:
                             _schedules = quads.get_current_schedule(**_kwargs)
                         except ConnectionError:
-                            logger.error("Could not connect to the quads-server, verify service is up and running.")
+                            logger.error(
+                                "Could not connect to the quads-server, verify service is up and running."
+                            )
                             exit(1)
                         if _schedules and "result" not in _schedules:
                             if type(_schedules) == list:
@@ -189,57 +288,98 @@ def main(_args):
                                     try:
                                         host = quads.get_hosts(id=entry["host"]["$oid"])
                                     except ConnectionError:
-                                        logger.error("Could not connect to the quads-server, verify service is up and running.")
+                                        logger.error(
+                                            "Could not connect to the quads-server, verify service is up and running."
+                                        )
                                         exit(1)
-                                    logger.info("- %s" % str(host['name']))
+                                    logger.info("- %s" % str(host["name"]))
                             else:
                                 try:
-                                    host = quads.get_hosts(id=_schedules["host"]["$oid"])
+                                    host = quads.get_hosts(
+                                        id=_schedules["host"]["$oid"]
+                                    )
                                 except ConnectionError:
-                                    logger.error("Could not connect to the quads-server, verify service is up and running.")
+                                    logger.error(
+                                        "Could not connect to the quads-server, verify service is up and running."
+                                    )
                                     exit(1)
-                                logger.info("- %s" % str(host['name']))
+                                logger.info("- %s" % str(host["name"]))
 
             exit(0)
 
-        elif _args.action in ['host', 'cloud']:
+        elif _args.action == "cloud":
             try:
                 entries = quads.get(_args.action)
             except ConnectionError:
-                logger.error("Could not connect to the quads-server, verify service is up and running.")
+                logger.error(
+                    "Could not connect to the quads-server, verify service is up and running."
+                )
                 exit(1)
             if entries and "result" not in entries:
-                for entry in sorted(entries, key=lambda k: k['name']):
-                    logger.info(entry['name'])
+                for entry in sorted(entries, key=lambda k: k["name"]):
+                    logger.info(entry["name"])
             elif "result" in entries:
-                logger.info(entries['result'])
+                logger.info(entries["result"])
+            exit(0)
+
+        elif _args.action == "host":
+            kwargs = {}
+            if _args.filter:
+                filter_args = filter_kwargs(_args.filter)
+                kwargs.update(filter_args)
+
+            hosts = Host.objects(**kwargs).all()
+            if hosts:
+                for host in sorted(hosts, key=lambda k: k["name"]):
+                    logger.info(host.name)
+            else:
+                logger.warning("No hosts found.")
+
             exit(0)
 
         elif _args.action == "available":
+            kwargs = {}
+            if _args.filter:
+                filter_args = filter_kwargs(_args.filter)
+                kwargs.update(filter_args)
+
             if _args.schedstart and _args.schedend is None:
                 _args.schedend = _args.schedstart
 
             if _args.schedstart is None and _args.schedend:
-                _args.schedstart = str(datetime.now())[:-10]
+                _args.schedstart = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             if _args.schedstart is None and _args.schedend is None:
-                _args.schedstart = _args.schedend = str(datetime.now())[:-10]
+                _args.schedstart = _args.schedend = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M"
+                )
 
-            _start = datetime.strptime(_args.schedstart, '%Y-%m-%d %H:%M').isoformat()
-            _end = datetime.strptime(_args.schedend, '%Y-%m-%d %H:%M').isoformat()
+            _start = datetime.strptime(_args.schedstart, "%Y-%m-%d %H:%M")
+            _end = datetime.strptime(_args.schedend, "%Y-%m-%d %H:%M")
 
-            data = {
-                "start": _start,
-                "end": _end,
-            }
-
+            available = []
+            all_hosts = Host.objects(**kwargs).all()
             try:
-                available_hosts = quads.get_available(**data)
-            except ConnectionError:
-                logger.error("Could not connect to the quads-server, verify service is up and running.")
-                exit(1)
+                len(all_hosts)
+            except InvalidQueryError as ᵔᴥᵔ:
+                logger.debug(ᵔᴥᵔ)
+                logger.debug(f"search params: {kwargs}")
+                logger.error(
+                    "There was something wrong constructing the parameters for the query."
+                )
 
-            for host in available_hosts:
+            broken_hosts = Host.objects(broken=True)
+
+            for host in all_hosts:
+                if (
+                    Schedule.is_host_available(
+                        host=host["name"], start=_start, end=_end
+                    )
+                    and host not in broken_hosts
+                ):
+                    available.append(host["name"])
+
+            for host in available:
                 logger.info(host)
 
             exit(0)
@@ -247,11 +387,23 @@ def main(_args):
         elif _args.action == "free_cloud":
             _clouds = Cloud.objects(name__ne="cloud01")
             for cloud in _clouds:
-                cloud_count = Schedule.objects(end__gte=datetime.now(), cloud=cloud).count()
-                if cloud_count > 0:
+                if Schedule.future_schedules(cloud=cloud).count():
                     continue
                 else:
-                    logger.info(cloud.name)
+                    cloud_reservation_lock = int(conf["cloud_reservation_lock"])
+                    lock_release = cloud.last_redefined + timedelta(
+                        hours=cloud_reservation_lock
+                    )
+                    cloud_string = f"{cloud.name}"
+                    if lock_release > datetime.now():
+                        time_left = lock_release - datetime.now()
+                        hours = time_left.total_seconds() // 3600
+                        minutes = (time_left.total_seconds() % 3600) // 60
+                        cloud_string += " (reserved: %dhr %dmin remaining)" % (
+                            hours,
+                            minutes,
+                        )
+                    logger.info(cloud_string)
 
             exit(0)
 
@@ -269,20 +421,16 @@ def main(_args):
                 end = last_day_month(now)
                 _args.schedend = str(end)[:-10]
 
-            _start = datetime.strptime(_args.schedstart, '%Y-%m-%d %H:%M')
-            _end = datetime.strptime(_args.schedend, '%Y-%m-%d %H:%M')
+            _start = datetime.strptime(_args.schedstart, "%Y-%m-%d %H:%M")
+            _end = datetime.strptime(_args.schedend, "%Y-%m-%d %H:%M")
 
             reports.report_available(logger, _start, _end)
 
             exit(0)
 
         elif _args.action == "report_scheduled":
-            if _args.months and _args.year:
-                logger.error('--months and --year are mutually exclusive.')
-                exit(1)
-
             if _args.months is None and _args.year is None:
-                logger.error('Missing argument. --months or --year must be provided.')
+                logger.error("Missing argument. --months or --year must be provided.")
                 exit(1)
 
             now = datetime.now()
@@ -311,55 +459,590 @@ def main(_args):
                 end = last_day_month(now)
                 _args.schedend = str(end)[:-10]
 
-            _start = datetime.strptime(_args.schedstart, '%Y-%m-%d %H:%M')
-            _end = datetime.strptime(_args.schedend, '%Y-%m-%d %H:%M')
+            _start = datetime.strptime(_args.schedstart, "%Y-%m-%d %H:%M")
+            _end = datetime.strptime(_args.schedend, "%Y-%m-%d %H:%M")
 
             reports.report_detailed(logger, _start, _end)
+
+            exit(0)
+
+        # Schedule Extend
+        elif _args.action == "extend":
+            if not _args.weeks and not _args.datearg:
+                logger.error(
+                    "Missing option. Need --weeks or --date when using --extend"
+                )
+                exit(1)
+
+            if _args.cloud is None and _args.host is None:
+                logger.error(
+                    "Missing option. At least one of either --host or --cloud is required."
+                )
+                exit(1)
+
+            if _args.weeks:
+                try:
+                    weeks = int(_args.weeks)
+                except ValueError:
+                    logger.error("The value of --weeks must be an integer")
+                    exit(1)
+            else:
+                _date = datetime.strptime(_args.datearg, "%Y-%m-%d %H:%M")
+
+            if _args.cloud:
+                cloud = Cloud.objects(name=str(_args.cloud)).first()
+                if not cloud:
+                    logger.error("Cloud not found")
+                    exit(1)
+
+                schedules = Schedule.current_schedule(cloud=cloud)
+                if not schedules:
+                    logger.error(
+                        "The selected cloud does not have any active schedules"
+                    )
+                    exit(1)
+
+                hosts = Host.objects(cloud=cloud)
+                non_extendable = []
+
+                if not hosts:
+                    logger.error(
+                        "The selected cloud does not have any active hosts assigned"
+                    )
+                    exit(1)
+
+                for host in hosts:
+                    schedule = Schedule.current_schedule(host=host).first()
+                    if _args.weeks:
+                        end_date = schedule.end + timedelta(weeks=weeks)
+                    else:
+                        end_date = _date
+                    if (
+                        not Schedule.is_host_available(
+                            host=host.name, start=schedule.end, end=end_date
+                        )
+                        or end_date < schedule.end
+                    ):
+                        non_extendable.append(host)
+
+                if non_extendable:
+                    logger.info(
+                        "The following hosts cannot be extended for the current allocation or target date is sooner than current end date:"
+                    )
+                    for host in non_extendable:
+                        logger.info(host.name)
+                    exit(1)
+
+                if not _args.check:
+                    notification_obj = Notification.objects(
+                        cloud=cloud, ticket=cloud.ticket
+                    ).first()
+                    if notification_obj:
+                        notification_obj.update(
+                            one_day=False,
+                            three_days=False,
+                            five_days=False,
+                            seven_days=False,
+                        )
+
+                    for schedule in schedules:
+                        if _args.weeks:
+                            end_date = schedule.end + timedelta(weeks=weeks)
+                        else:
+                            end_date = _date
+                        schedule.update(end=end_date)
+
+                    if _args.weeks:
+                        logger.info(
+                            "Cloud %s has now been extended for %s week[s] until %s"
+                            % (cloud.name, str(weeks), str(end_date)[:16])
+                        )
+                    else:
+                        logger.info(
+                            "Cloud %s has now been extended until %s"
+                            % (cloud.name, str(end_date)[:16])
+                        )
+                else:
+                    logger.info(
+                        "Cloud %s can be extended until %s"
+                        % (cloud.name, str(end_date)[:16])
+                    )
+
+            elif _args.host:
+                host = Host.objects(name=str(_args.host)).first()
+                if not host:
+                    logger.error("Host not found")
+                    exit(1)
+
+                schedule = Schedule.current_schedule(host=host).first()
+                if not schedule:
+                    logger.error("The selected host does not have any active schedules")
+                    exit(1)
+
+                if _args.weeks:
+                    end_date = schedule.end + timedelta(weeks=weeks)
+                else:
+                    end_date = _date
+                if not Schedule.is_host_available(
+                    host=host.name, start=schedule.end, end=end_date
+                ):
+                    logger.info(
+                        "The host cannot be extended for the current allocation as "
+                        "it is not available during that time frame"
+                    )
+                    exit(1)
+
+                if not _args.check:
+                    notification_obj = Notification.objects(
+                        cloud=schedule.cloud, ticket=schedule.cloud.ticket
+                    ).first()
+                    if notification_obj:
+                        notification_obj.update(
+                            one_day=False,
+                            three_days=False,
+                            five_days=False,
+                            seven_days=False,
+                        )
+
+                    if _args.weeks:
+                        end_date = schedule.end + timedelta(weeks=int(weeks))
+                    else:
+                        end_date = _date
+                    schedule.update(end=end_date)
+                    if _args.weeks:
+                        logger.info(
+                            "Host %s has now been extended for %s week[s] until %s"
+                            % (host.name, str(weeks), str(end_date)[:16])
+                        )
+                    else:
+                        logger.info(
+                            "Host %s has now been extended until %s"
+                            % (host.name, str(end_date)[:16])
+                        )
+
+                else:
+                    logger.info(
+                        "Host %s can be extended until %s"
+                        % (host.name, str(end_date)[:16])
+                    )
+
+            exit(0)
+
+        elif _args.action == "shrink":
+            if not _args.weeks and not _args.now and not _args.datearg:
+                logger.error(
+                    "Missing option. Need --weeks, --date or --now when using --shrink"
+                )
+                exit(1)
+
+            if _args.cloud is None and _args.host is None:
+                logger.error(
+                    "Missing option. At least one of either --host or --cloud is required"
+                )
+                exit(1)
+
+            time_delta = timedelta()
+            if _args.weeks:
+                try:
+                    weeks = int(_args.weeks)
+                except ValueError:
+                    logger.error("The value of --weeks must be an integer")
+                    exit(1)
+                time_delta = timedelta(weeks=weeks)
+            elif _args.datearg:
+                _date = datetime.strptime(_args.datearg, "%Y-%m-%d %H:%M")
+            elif _args.now:
+                _date = datetime.now()
+
+            threshold = datetime.now() + timedelta(hours=1)
+
+            if _args.cloud:
+                cloud = Cloud.objects(name=str(_args.extendcloud)).first()
+                if not cloud:
+                    logger.error("Cloud not found")
+                    exit(1)
+
+                schedules = Schedule.current_schedule(cloud=cloud)
+                if not schedules:
+                    logger.error(
+                        "The selected cloud does not have any active schedules"
+                    )
+                    exit(1)
+
+                hosts = Host.objects(cloud=cloud)
+                non_shrinkable = []
+
+                if not hosts:
+                    logger.error(
+                        "The selected cloud does not have any active hosts assigned"
+                    )
+                    exit(1)
+
+                for host in hosts:
+                    schedule = Schedule.current_schedule(host=host).first()
+                    if _args.weeks:
+                        end_date = schedule.end - time_delta
+                    else:
+                        end_date = _date
+                    if end_date < schedule.start or end_date > schedule.end or (not _args.now and end_date < threshold):
+                        non_shrinkable.append(host)
+
+                if non_shrinkable:
+                    logger.info(
+                        "The following hosts cannot be shrunk past it's start date, target date means an extension"
+                        " or target date is earlier than 1 hour from now:"
+                    )
+                    for host in non_shrinkable:
+                        logger.info(host.name)
+                    exit(1)
+
+                if not _args.check:
+                    notification_obj = Notification.objects(
+                        cloud=cloud, ticket=cloud.ticket
+                    ).first()
+                    if notification_obj:
+                        notification_obj.update(
+                            one_day=True,
+                            three_days=True,
+                            five_days=True,
+                            seven_days=True,
+                        )
+
+                    if _args.weeks:
+                        confirmation = input(f"Are you sure you want to shrink {cloud.name} for {_args.weeks} week[s]? (y/N): ") or "N"
+                    else:
+                        confirmation = input(f"Are you sure you want to shrink {cloud.name} to {str(_date)[:16]}? (y/N): ") or "N"
+
+                    if confirmation.lower() not in ("y", "yes"):
+                        exit(0)
+
+                    for schedule in schedules:
+                        if _args.weeks:
+                            end_date = schedule.end - time_delta
+                        else:
+                            end_date = _date
+                        schedule.update(end=end_date)
+                    if _args.weeks:
+                        logger.info(
+                            "Cloud %s has now been shrunk for %s week[s] until %s"
+                            % (cloud.name, str(weeks), str(end_date)[:16])
+                        )
+                    elif _args.datearg:
+                        logger.info(
+                            "Cloud %s has now been shrunk to %s"
+                            % (cloud.name, str(end_date)[:16])
+                        )
+                    else:
+                        logger.info("Cloud %s has now been terminated" % cloud.name)
+                else:
+                    if _args.weeks:
+                        logger.info(
+                            "Cloud %s can be shrunk for %s week[s] to %s"
+                            % (cloud.name, str(weeks), str(end_date)[:16])
+                        )
+                    elif _args.datearg:
+                        logger.info(
+                            "Cloud %s can be shrunk to %s"
+                            % (cloud.name, str(end_date)[:16])
+                        )
+                    else:
+                        logger.info("Cloud %s can be terminated now" % cloud.name)
+
+            elif _args.host:
+                host = Host.objects(name=str(_args.host)).first()
+                if not host:
+                    logger.error("Host not found")
+                    exit(1)
+
+                schedule = Schedule.current_schedule(host=host).first()
+                if not schedule:
+                    logger.error("The selected host does not have any active schedules")
+                    exit(1)
+
+                if _args.weeks:
+                    end_date = schedule.end - time_delta
+                else:
+                    end_date = _date
+                if end_date < schedule.start or end_date > schedule.end or (not _args.now and end_date < threshold):
+                    logger.info(
+                        "The host cannot be shrunk past it's start date, target date means an extension"
+                        " or target date is earlier than 1 hour from now:"
+                    )
+                    exit(1)
+
+                if not _args.check:
+                    notification_obj = Notification.objects(
+                        cloud=schedule.cloud, ticket=schedule.cloud.ticket
+                    ).first()
+                    if notification_obj:
+                        notification_obj.update(
+                            one_day=True,
+                            three_days=True,
+                            five_days=True,
+                            seven_days=True,
+                        )
+
+                    confirmation = input(f"Are you sure you want to shrink {host.name} to {str(end_date)[:16]}? (y/N): ") or "N"
+
+                    if confirmation.lower() not in ("y", "yes"):
+                        exit(0)
+
+                    schedule.update(end=end_date)
+                    if _args.weeks:
+                        logger.info(
+                            "Host %s has now been shrunk for %s week[s] to %s"
+                            % (host.name, str(weeks), str(end_date)[:16])
+                        )
+                    elif _args.datearg:
+                        logger.info(
+                            "Host %s has now been shrunk to %s"
+                            % (host.name, str(end_date)[:16])
+                        )
+                    else:
+                        logger.info(
+                            "Host %s schedule has now been terminated" % host.name
+                        )
+                else:
+                    if _args.weeks:
+                        logger.info(
+                            "Host %s can be shrunk for %s weeks until %s"
+                            % (host.name, str(weeks), str(end_date)[:16])
+                        )
+                    elif _args.datearg:
+                        logger.info(
+                            "Host %s can been shrunk to %s"
+                            % (host.name, str(end_date)[:16])
+                        )
+                    else:
+                        logger.info(
+                            "Host %s schedule can be terminated now" % host.name
+                        )
 
             exit(0)
 
     # Cloud Add / Modify
     elif _args.cloudresource:
         data = {
-            'name': _args.cloudresource,
-            'description': _args.description,
-            'owner': _args.cloudowner,
-            'ccuser': _args.ccusers,
-            'qinq': _args.qinq,
-            'wipe': _args.wipe,
-            'ticket': _args.cloudticket,
-            'vlan': _args.vlan,
-            'force': _args.force
+            "name": _args.cloudresource,
+            "description": _args.description,
+            "owner": _args.cloudowner,
+            "ccuser": _args.ccusers,
+            "qinq": _args.qinq,
+            "wipe": _args.no_wipe or _args.wipe,
+            "ticket": _args.cloudticket,
+            "vlan": _args.vlan,
+            "force": _args.force,
         }
+        cloud_reservation_lock = int(conf["cloud_reservation_lock"])
+        cloud = Cloud.objects(name=data["name"]).first()
+        lock_release = cloud.last_redefined + timedelta(hours=cloud_reservation_lock)
+        cloud_string = f"{cloud.name}"
+        if lock_release > datetime.now():
+            time_left = lock_release - datetime.now()
+            hours = time_left.total_seconds() // 3600
+            minutes = (time_left.total_seconds() % 3600) // 60
+            cloud_string += " (reserved: %dhr %dmin remaining)" % (hours, minutes)
+            logger.warning("Can't redefine cloud:")
+            logger.warning(cloud_string)
+            exit(1)
         try:
             logger.info(quads.insert_cloud(data)["result"])
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
+        exit(0)
+
+    # Cloud Modify
+    elif _args.modcloud:
+        data = {
+            "name": _args.modcloud,
+            "description": _args.description,
+            "owner": _args.cloudowner,
+            "ccuser": _args.ccusers,
+            "ticket": _args.cloudticket,
+            "vlan": _args.vlan,
+        }
+
+        clean_data = {k: v for k, v in data.items() if v and k is not "name"}
+
+        if "--wipe" in sys.argv or "--no-wipe" in sys.argv:
+            clean_data["wipe"] = _args.no_wipe or _args.wipe
+        if "--qinq" in sys.argv:
+            clean_data["qinq"] = _args.qinq
+
+        cloud = Cloud.objects(name=data["name"]).first()
+        results, prep_data = Cloud.prep_data(
+            clean_data, fields=clean_data.keys(), mod=True
+        )
+        if cloud and not results:
+            cloud.update(**prep_data)
+        else:
+            if results:
+                logger.error(f"Failed to validate data for {_args.modcloud}")
+                for result in results:
+                    logger.error(result)
+                exit(1)
+            else:
+                logger.error("Cloud not found")
+                exit(1)
+
+        logger.info("Cloud modified successfully")
         exit(0)
 
     # Cloud Remove
     elif _args.rmcloud is not None:
-        url = os.path.join(API_URL, 'cloud', _args.rmcloud)
+        url = os.path.join(API_URL, "cloud", _args.rmcloud)
         _response = requests.delete(url)
-        output_json_result(_response, {'cloud': _args.rmcloud})
+        output_json_result(_response, {"cloud": _args.rmcloud})
         exit(0)
 
     # Host Add / Modify
     elif _args.hostresource:
         if not _args.hostcloud:
-            logger.error('Missing option --default-cloud')
+            logger.error("Missing option --default-cloud")
             exit(1)
-        if _args.cloudresource:
-            logger.error('--define-cloud and --define-host are mutually exclusive.')
-            exit(1)
-        url = os.path.join(API_URL, 'host')
-        data = {'name': _args.hostresource,
-                'default_cloud': _args.hostcloud,
-                'host_type': _args.hosttype,
-                'force': _args.force}
+
+        url = os.path.join(API_URL, "host")
+        data = {
+            "name": _args.hostresource,
+            "default_cloud": _args.hostcloud,
+            "host_type": _args.hosttype,
+            "force": _args.force,
+        }
         _response = requests.post(url, data)
         output_json_result(_response, data)
+        exit(0)
+
+    # Host Add / Modify metadata
+    elif _args.host_metadata:
+        if not _args.metadata:
+            logger.error("Missing option --metadata")
+            exit(1)
+        if not os.path.exists(_args.metadata):
+            logger.error("The path for the --metadata yaml is not valid")
+            exit(1)
+        try:
+            with open(_args.metadata) as md:
+                hosts_metadata = yaml.safe_load(md)
+        except IOError as ಠ_ಠ:
+            logger.debug(ಠ_ಠ)
+            logger.error(f"There was something wrong reading from {_args.metadata}")
+            exit(1)
+
+        for host_md in hosts_metadata:
+            ready_defined = []
+            host = Host.objects(name=host_md.get("name")).first()
+            data = {}
+            if host:
+                for key, value in host_md.items():
+                    if key != "name" and host[key]:
+                        ready_defined.append(key)
+                        if not _args.force:
+                            continue
+                    if type(value) == list:
+                        dispatch = {"disks": Disk, "interfaces": Interface}
+                        if host[key]:
+                            param_key = f"unset__{key}"
+                            kwargs = {param_key: 1}
+                            Host.objects(name=host.name).update_one(**kwargs)
+                        for obj in value:
+                            result = True
+                            if dispatch.get(key):
+                                result, data_obj = dispatch[key].prep_data(obj)
+                            else:
+                                logger.error(
+                                    f"Invalid key '{key}' on metadata for {host.name}"
+                                )
+                                exit(1)
+                            if result:
+                                logger.error(
+                                    f"{key.capitalize()} data for {host.name} is invalid"
+                                )
+                                break
+                            new_obj = dispatch[key](**data_obj)
+
+                            param_key = f"push__{key}"
+                            kwargs = {param_key: new_obj}
+                            Host.objects(name=host.name).update_one(**kwargs)
+                    elif key == "default_cloud":
+                        cloud = Cloud.objects(name=value).first()
+                        data[key] = cloud
+                    else:
+                        result, prep_data = host.prep_data(
+                            data={"name": host.name, key: value}, fields=["name", key]
+                        )
+                        if result:
+                            logger.error(
+                                f"{key.capitalize()} data for {host.name} is invalid"
+                            )
+                            continue
+                        data.update(prep_data)
+                if ready_defined:
+                    action = "SKIPPING" if not _args.force else "RECREATING"
+                    logger.warning(f"{host.name} [{action}]: {ready_defined}")
+                if data and len(data.keys()) > 1:
+                    host.update(**data)
+
+            else:
+                logger.error(
+                    "Host not found. Check hostname or if name is defined on the yaml."
+                )
+
+        if not _args.force:
+            logger.warning("For overwriting existing values use the --force.")
+
+        exit(0)
+
+    # Host Metadata export
+    elif _args.host_metadata_export:
+        all_hosts = Host.objects()
+        content = []
+        for host in all_hosts:
+            host_meta = {
+                "name": host.name,
+                "model": host.model,
+                "host_type": host.host_type,
+                "default_cloud": host.default_cloud.name,
+            }
+
+            interfaces = []
+            for interface in host.interfaces:
+                interface_dict = {
+                    "name": interface.name,
+                    "mac_address": interface.mac_address,
+                    "ip_address": interface.ip_address,
+                    "switch_port": interface.switch_port,
+                    "speed": interface.speed,
+                    "maintenance": interface.maintenance,
+                }
+                interfaces.append(interface_dict)
+            if interfaces:
+                host_meta["interfaces"] = interfaces
+
+            disks = []
+            for disk in host.disks:
+                disk_dict = {
+                    "disk_type": disk.disk_type,
+                    "size_gb": disk.size_gb,
+                    "count": disk.count,
+                }
+                disks.append(disk_dict)
+            if disks:
+                host_meta["disks"] = disks
+
+            content.append(host_meta)
+
+        try:
+            with open(_args.host_metadata_export, "w") as _file:
+                yaml.dump(content, _file)
+        except Exception as ಠ益ಠ:
+            logger.debug(ಠ益ಠ)
+            logger.error("There was something wrong writing to file.")
+            exit(1)
+
+        logger.info("Metadata successfully exported.")
         exit(0)
 
     # Host Remove
@@ -369,29 +1052,34 @@ def main(_args):
         if future_schedules:
             logger.error("Can't remove host with future schedule.")
             exit(1)
-        url = os.path.join(API_URL, 'host', _args.rmhost)
+        url = os.path.join(API_URL, "host", _args.rmhost)
         _response = requests.delete(url)
-        output_json_result(_response, {'host': _args.rmhost})
+        output_json_result(_response, {"host": _args.rmhost})
         exit(0)
 
     # Add Interface
     elif _args.addinterface:
-        if _args.ifmac is None \
-                or _args.ifip is None or _args.ifport is None \
-                or _args.host is None:
-            logger.error('Missing option. All these options are required for --add-interface:')
-            logger.error('    --host')
-            logger.error('    --interface-mac')
-            logger.error('    --interface-ip')
-            logger.error('    --interface-port')
-        url = os.path.join(API_URL, 'interfaces')
+        if (
+            _args.ifmac is None
+            or _args.ifip is None
+            or _args.ifport is None
+            or _args.host is None
+        ):
+            logger.error(
+                "Missing option. All these options are required for --add-interface:"
+            )
+            logger.error("    --host")
+            logger.error("    --interface-mac")
+            logger.error("    --interface-ip")
+            logger.error("    --interface-port")
+        url = os.path.join(API_URL, "interfaces")
         data = {
-            'name': _args.addinterface,
-            'mac_address': _args.ifmac,
-            'ip_address': _args.ifip,
-            'switch_port': _args.ifport,
-            'host': _args.host,
-            'force': _args.force
+            "name": _args.addinterface,
+            "mac_address": _args.ifmac,
+            "ip_address": _args.ifip,
+            "switch_port": _args.ifport,
+            "host": _args.host,
+            "force": _args.force,
         }
         _response = requests.post(url, data)
         output_json_result(_response, data)
@@ -399,92 +1087,125 @@ def main(_args):
 
     elif _args.rminterface is not None:
         if _args.host is None:
-            logger.error('Missing option. --host option is required for --rm-interface:')
+            logger.error(
+                "Missing option. --host option is required for --rm-interface:"
+            )
             exit(1)
-        data = {'host': _args.host, 'name': _args.rminterface}
+        data = {"host": _args.host, "name": _args.rminterface}
         try:
             logger.info(quads.remove_interface(**data))
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
         exit(0)
 
     # Add Schedule
     elif _args.addschedule:
-        if _args.schedstart is None or _args.schedend is None \
-                or _args.schedcloud is None or _args.host is None:
-            logger.error('Missing option. All these options are required for --add-schedule:')
-            logger.error('    --host')
-            logger.error('    --schedule-start')
-            logger.error('    --schedule-end')
-            logger.error('    --schedule-cloud')
+        if (
+            _args.schedstart is None
+            or _args.schedend is None
+            or _args.schedcloud is None
+            or _args.host is None
+        ):
+            logger.error(
+                "Missing option. All these options are required for --add-schedule:"
+            )
+            logger.error("    --host")
+            logger.error("    --schedule-start")
+            logger.error("    --schedule-end")
+            logger.error("    --schedule-cloud")
             exit(1)
-        data = {'cloud': _args.schedcloud,
-                'host': _args.host,
-                'start': _args.schedstart,
-                'end': _args.schedend}
+        data = {
+            "cloud": _args.schedcloud,
+            "host": _args.host,
+            "start": _args.schedstart,
+            "end": _args.schedend,
+        }
         try:
-            logger.info(quads.insert_schedule(data)['result'])
+            logger.info(quads.insert_schedule(data)["result"])
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
         exit(0)
 
+    # Schedule Remove
     elif _args.rmschedule is not None:
         if _args.host:
             data = {"host": _args.host, "index": str(_args.rmschedule)}
             try:
                 logger.info(quads.remove_schedule(**data))
             except ConnectionError:
-                logger.error("Could not connect to the quads-server, verify service is up and running.")
+                logger.error(
+                    "Could not connect to the quads-server, verify service is up and running."
+                )
                 exit(1)
             exit(0)
         else:
-            logger.error('Missing option. Need --host when using --rm-schedule')
+            logger.error("Missing option. Need --host when using --rm-schedule")
             exit(1)
 
+    # Schedule Mod
     elif _args.modschedule is not None:
         if _args.host is None:
-            logger.error('Missing option. Need --host when using --mod-schedule')
+            logger.error("Missing option. Need --host when using --mod-schedule")
             exit(1)
 
-        if _args.schedstart is None and _args.schedend is None and _args.schedcloud is None:
-            logger.error('Missing option. At least one these options are required for --mod-schedule:')
-            logger.error('    --schedule-start')
-            logger.error('    --schedule-end')
-            logger.error('    --schedule-cloud')
+        if (
+            _args.schedstart is None
+            and _args.schedend is None
+            and _args.schedcloud is None
+        ):
+            logger.error(
+                "Missing option. At least one these options are required for --mod-schedule:"
+            )
+            logger.error("    --schedule-start")
+            logger.error("    --schedule-end")
+            logger.error("    --schedule-cloud")
             exit(1)
 
-        data = {'index': _args.modschedule,
-                'start': _args.schedstart,
-                'end': _args.schedend,
-                'cloud': _args.schedcloud,
-                'host': _args.host}
+        data = {
+            "index": _args.modschedule,
+            "start": _args.schedstart,
+            "end": _args.schedend,
+            "cloud": _args.schedcloud,
+            "host": _args.host,
+        }
         try:
             logger.info(quads.insert_schedule(data)["result"])
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
         exit(0)
 
+    # Move hosts
     elif _args.movehosts:
         if _args.datearg is not None and not _args.dryrun:
-            logger.error('--move-hosts and --date are mutually exclusive unless using --dry-run.')
+            logger.error(
+                "--move-hosts and --date are mutually exclusive unless using --dry-run."
+            )
             exit(1)
-        url = os.path.join(API_URL, 'moves')
+        url = os.path.join(API_URL, "moves")
         data = {}
         if _args.datearg is not None:
-            data['date'] = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M').isoformat()
+            data["date"] = datetime.strptime(
+                _args.datearg, "%Y-%m-%d %H:%M"
+            ).isoformat()
         _response = requests.get(url, data)
         js = _response.json()
-        if 'result' in js:
-            if len(js['result']) == 0:
-                logger.info('Nothing to do.')
+        if "result" in js:
+            if len(js["result"]) == 0:
+                logger.info("Nothing to do.")
                 exit(0)
 
             _clouds = defaultdict(list)
-            for result in js['result']:
-                _clouds[result['new']].append(result)
+            for result in js["result"]:
+                _clouds[result["new"]].append(result)
 
             # TODO:
             #  raise the number of semaphores after this is resolved
@@ -495,31 +1216,58 @@ def main(_args):
                 tasks = []
                 switch_tasks = []
                 for result in results:
-                    host = result['host']
-                    current = result['current']
-                    new = result['new']
+                    host = result["host"]
+                    current = result["current"]
+                    new = result["new"]
                     cloud = Cloud.objects(name=new).first()
-                    logger.info('Moving %s from %s to %s, wipe = %s' % (host, current, new, cloud.wipe))
+                    logger.info(
+                        "Moving %s from %s to %s, wipe = %s"
+                        % (host, current, new, cloud.wipe)
+                    )
                     if not _args.dryrun:
+                        host_obj = Host.objects(name=host).first()
+                        host_obj.update(switch_config_applied=False)
                         if new != "cloud01":
                             has_active_schedule = Schedule.current_schedule(cloud=cloud)
-                            if has_active_schedule:
+                            if has_active_schedule and cloud.wipe:
                                 cloud.update(validated=False)
                         try:
                             if _args.movecommand == default_move_command:
-                                fn = functools.partial(move_and_rebuild, host, new, semaphore, cloud.wipe)
+                                fn = functools.partial(
+                                    move_and_rebuild, host, new, semaphore, cloud.wipe
+                                )
                                 tasks.append(fn)
-                                switch_tasks.append(functools.partial(switch_config, host, current, new))
+                                switch_tasks.append(
+                                    functools.partial(switch_config, host, current, new)
+                                )
                             else:
                                 if cloud.wipe:
-                                    subprocess.check_call([args.movecommand, host, current, new])
+                                    subprocess.check_call(
+                                        [args.movecommand, host, current, new]
+                                    )
                                 else:
-                                    subprocess.check_call([args.movecommand, host, current, new, "nowipe"])
-                        except:
-                            logger.exception('Move command failed for host: %s' % host)
+                                    subprocess.check_call(
+                                        [args.movecommand, host, current, new, "nowipe"]
+                                    )
+                        except Exception as ex:
+                            logger.debug(ex)
+                            logger.exception("Move command failed for host: %s" % host)
                             provisioned = False
 
                 if not _args.dryrun:
+                    _old_cloud_obj = Cloud.objects(name=results[0]["current"]).first()
+                    old_cloud_schedule = Schedule.current_schedule(cloud=_old_cloud_obj)
+
+                    default_wipe = conf.get("default_wipe", True)
+                    if not old_cloud_schedule and _old_cloud_obj.name != "cloud01":
+                        _old_cloud_obj.update(
+                            validated=False,
+                            provisioned=False,
+                            vlan=None,
+                            wipe=default_wipe,
+                            ccuser=[],
+                        )
+
                     done = None
                     loop = asyncio.get_event_loop()
                     loop.set_exception_handler(exception_handler)
@@ -527,19 +1275,27 @@ def main(_args):
                         done = loop.run_until_complete(
                             asyncio.gather(*[task(loop) for task in tasks])
                         )
-                    except (asyncio.CancelledError, SystemExit, Exception, TimeoutError):
-                        logger.exception('Move command failed')
+                    except (
+                        asyncio.CancelledError,
+                        SystemExit,
+                        Exception,
+                        TimeoutError,
+                    ):
+                        logger.exception("Move command failed")
                         provisioned = False
                     for task in switch_tasks:
                         try:
-                            logger.info(f"Running switch config for {task.args[0]}")
-                            task()
+                            host_obj = Host.objects(name=task.args[0]).first()
+                            if not host_obj.switch_config_applied:
+                                logger.info(f"Running switch config for {task.args[0]}")
+                                task()
+                                host_obj.update(switch_config_applied=True)
                         except Exception:
-                            logger.exception("There was something wrong configuring the switch.")
+                            logger.exception(
+                                "There was something wrong configuring the switch."
+                            )
                             provisioned = False
 
-                    # TODO: Add logic here for setting host to validated=false
-                    #  if result["new"]==default_cloud
                     if done:
                         for future in done:
                             if isinstance(future, Exception):
@@ -549,21 +1305,59 @@ def main(_args):
 
                     if provisioned:
                         _new_cloud_obj = Cloud.objects(name=_cloud).first()
-                        _new_cloud_obj.update(provisioned=True, validated=False)
-
-                    _old_cloud_obj = Cloud.objects(name=results[0]["current"]).first()
-                    old_cloud_schedule = Schedule.current_schedule(cloud=_old_cloud_obj)
-                    if not old_cloud_schedule and _old_cloud_obj.name != "cloud01":
-                        _old_cloud_obj.update(validated=False, provisioned=False, vlan=None, wipe=True, ccuser=[])
+                        validate = not _new_cloud_obj.wipe
+                        _new_cloud_obj.update(provisioned=True, validated=validate)
 
             exit(0)
+
+    elif _args.mark_broken:
+        if _args.host:
+            host = Host.objects(name=_args.host).first()
+            if host:
+                if host.broken:
+                    logger.warning(
+                        "Host %s has already been marked broken" % (host.name)
+                    )
+                else:
+                    host.update(broken=True)
+                    logger.info(f"Host {host.name} is now marked as broken")
+            else:
+                logger.error(f"Host {_args.host} not found")
+                exit(1)
+
+            exit(0)
+        else:
+            logger.error("Missing option. Need --host when using --mark-broken")
+            exit(1)
+
+    elif _args.mark_repaired:
+        if _args.host:
+            host = Host.objects(name=_args.host).first()
+            if host:
+                if not host.broken:
+                    logger.warning(
+                        "Host %s has already been marked repaired" % (host.name)
+                    )
+                else:
+                    host.update(broken=False)
+                    logger.info("Host %s is now marked as repaired" % (host.name))
+            else:
+                logger.error("Host not found")
+                exit(1)
+
+            exit(0)
+        else:
+            logger.error("Missing option. Need --host when using --mark-repaired")
+            exit(1)
 
     elif _args.host:
         _host = Host.objects(name=_args.host).first()
         if _host:
             _kwargs = {"host": _host}
             if _args.datearg:
-                _kwargs["date"] = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M').isoformat()
+                _kwargs["date"] = datetime.strptime(
+                    _args.datearg, "%Y-%m-%d %H:%M"
+                ).isoformat()
             schedules = Schedule.current_schedule(**_kwargs)
             if schedules:
                 for schedule in schedules:
@@ -571,7 +1365,7 @@ def main(_args):
             else:
                 logger.info(_host.default_cloud.name)
         else:
-            logger.info('Unknown host: %s' % _args.host)
+            logger.info("Unknown host: %s" % _args.host)
             exit(1)
 
         exit(0)
@@ -583,10 +1377,12 @@ def main(_args):
             exit(1)
         _kwargs = {"cloud": _cloud}
         if _args.datearg:
-            _kwargs["date"] = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M').isoformat()
+            _kwargs["date"] = datetime.strptime(
+                _args.datearg, "%Y-%m-%d %H:%M"
+            ).isoformat()
         schedules = Schedule.current_schedule(**_kwargs)
         if schedules:
-            for schedule in sorted(schedules, key=lambda k: k['host']['name']):
+            for schedule in sorted(schedules, key=lambda k: k["host"]["name"]):
                 logger.info(schedule.host.name)
         else:
             if _kwargs.get("date") and _args.cloudonly == "cloud01":
@@ -598,14 +1394,16 @@ def main(_args):
                 try:
                     available_hosts = quads.get_available(**data)
                 except ConnectionError:
-                    logger.error("Could not connect to the quads-server, verify service is up and running.")
+                    logger.error(
+                        "Could not connect to the quads-server, verify service is up and running."
+                    )
                     exit(1)
 
                 for host in sorted(available_hosts):
                     logger.info(host)
             else:
                 _hosts = Host.objects(cloud=_cloud)
-                for host in sorted(_hosts, key=lambda k: k['name']):
+                for host in sorted(_hosts, key=lambda k: k["name"]):
                     logger.info(host.name)
 
         exit(0)
@@ -613,22 +1411,43 @@ def main(_args):
     elif _args.summary or _args.fullsummary:
         _kwargs = {}
         if _args.datearg:
-            _kwargs["date"] = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M').isoformat()
+            _kwargs["date"] = datetime.strptime(
+                _args.datearg, "%Y-%m-%d %H:%M"
+            ).isoformat()
         try:
-            summary = quads.get_summary()
+            summary = quads.get_summary(**_kwargs)
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
         for cloud in summary:
             if _args.fullsummary or cloud["count"] > 0:
-                logger.info("%s: %s (%s)" % (cloud["name"], cloud["count"], cloud["description"]))
+                if _args.detail:
+                    logger.info(
+                        "%s (%s): %s (%s) - %s"
+                        % (
+                            cloud["name"],
+                            cloud["owner"],
+                            cloud["count"],
+                            cloud["description"],
+                            cloud["ticket"],
+                        )
+                    )
+                else:
+                    logger.info(
+                        "%s: %s (%s)"
+                        % (cloud["name"], cloud["count"], cloud["description"])
+                    )
         exit(0)
 
     elif _args.version:
         try:
             version = quads.get_version()
         except ConnectionError:
-            logger.error("Could not connect to the quads-server, verify service is up and running.")
+            logger.error(
+                "Could not connect to the quads-server, verify service is up and running."
+            )
             exit(1)
         if "result" in version:
             logger.info(version["result"])
@@ -638,7 +1457,7 @@ def main(_args):
     hosts = Host.objects()
     _date = datetime.now()
     if _args.datearg:
-        _date = datetime.strptime(_args.datearg, '%Y-%m-%d %H:%M')
+        _date = datetime.strptime(_args.datearg, "%Y-%m-%d %H:%M")
     for cloud in clouds:
         if cloud.name == "cloud01":
             available = []
@@ -659,89 +1478,469 @@ def main(_args):
     exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    sys.path.append(conf["install_dir"])
+    sys.path.append(os.path.dirname(__file__) + "/../")
 
-    sys.path.append(conf['install_dir'])
-    sys.path.append(os.path.dirname(__file__) + '/../')
+    default_move_command = "/opt/quads/quads/tools/move_and_rebuild_hosts.py"
 
-    default_move_command = '/opt/quads/quads/tools/move_and_rebuild_hosts.py'
-
-    parser = argparse.ArgumentParser(description='Query current cloud for a given host')
+    parser = argparse.ArgumentParser(description="Query current cloud for a given host")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument('--ls-owner', dest='action', action='store_const', const='owner', help='List owners')
-    group.add_argument('--ls-cc-users', dest='action', action='store_const', const='ccuser', help='List CC list')
-    group.add_argument('--ls-ticket', dest='action', action='store_const', const='ticket', help='List request ticket')
-    group.add_argument('--ls-qinq', dest='action', action='store_const', const='qinq', help='List cloud qinq state')
-    group.add_argument('--ls-wipe', dest='action', action='store_const', const='wipe', help='List cloud wipe state')
-    group.add_argument('--define-host', dest='hostresource', type=str, default=None, help='Define a host resource')
-    group.add_argument('--define-cloud', dest='cloudresource', type=str, default=None,
-                       help='Define a cloud environment')
-    group.add_argument('--add-schedule', dest='addschedule', action='store_true', help='Define a host reservation')
-    group.add_argument('--mod-schedule', dest='modschedule', type=str, default=None, help='Modify a host reservation')
-    group.add_argument('--add-interface', dest='addinterface', type=str, default=None, help='Define a host interface')
-    group.add_argument('--rm-schedule', dest='rmschedule', type=str, default=None, help='Remove a host reservation')
-    group.add_argument('--rm-interface', dest='rminterface', type=str, default=None, help='Remove a host interface')
-    group.add_argument('--ls-hosts', dest='action', action='store_const', const='host', help='List all hosts')
-    group.add_argument('--ls-clouds', dest='action', action='store_const', const='cloud', help='List all clouds')
-    group.add_argument('--rm-host', dest='rmhost', type=str, default=None, help='Remove a host')
-    group.add_argument('--rm-cloud', dest='rmcloud', type=str, default=None, help='Remove a cloud')
-    group.add_argument('--ls-available', dest='action', action='store_const', const='available',
-                       help='List available hosts on a specific time frame')
-    group.add_argument('--ls-schedule', dest='action', action='store_const', const='schedule',
-                       help='List the host reservations')
-    group.add_argument('--ls-interface', dest='action', action='store_const', const='interface',
-                       help='List the host interfaces')
-    group.add_argument('--find-free-cloud', dest='action', action='store_const', const='free_cloud',
-                       help='List available hosts on a specific time frame')
-    group.add_argument('--report-available', dest='action', action='store_const', const='report_available',
-                       help='QUADS reporting server availability')
-    group.add_argument('--report-scheduled', dest='action', action='store_const', const='report_scheduled',
-                       help='QUADS reporting detailed scheduled assignments')
-    group.add_argument('--report-detailed', dest='action', action='store_const', const='report_detailed',
-                       help='QUADS reporting scheduled assignments')
-    parser.add_argument('--host', dest='host', type=str, default=None, help='Specify the host to query')
-    parser.add_argument('--cloud-only', dest='cloudonly', type=str, default=None,
-                        help='Limit full report to hosts only in this cloud')
-    parser.add_argument('-d', '--datetime', dest='datearg', type=str, default=None,
-                        help='date and time to query; e.g. "2016-06-01 08:00"')
-    parser.add_argument('--cloud-owner', dest='cloudowner', type=str, default=None, help='Define environment owner')
-    parser.add_argument('--cc-users', dest='ccusers', type=str, default=None, help='Define environment CC list')
-    parser.add_argument('--qinq', dest='qinq', action='store_false', help='Define environment qinq state')
-    parser.add_argument('--no-wipe', dest='wipe', action='store_false',
-                        help='Define no wipe for safeguarding data after assignment')
-    parser.add_argument('--cloud-ticket', dest='cloudticket', type=str, default=None, help='Define environment ticket')
-    parser.add_argument('--description', dest='description', type=str, default=None,
-                        help='Defined description of cloud')
-    parser.add_argument('--default-cloud', dest='hostcloud', type=str, default=None,
-                        help='Defined default cloud for a host')
-    parser.add_argument('--force', dest='force', action='store_true',
-                        help='Force host or cloud update when already defined')
-    parser.add_argument('--summary', dest='summary', action='store_true', help='Generate a summary report')
-    parser.add_argument('--full-summary', dest='fullsummary', action='store_true', help='Generate a summary report')
-    parser.add_argument('--schedule-start', dest='schedstart', type=str, default=None, help='Schedule start date/time')
-    parser.add_argument('--schedule-end', dest='schedend', type=str, default=None, help='Schedule end date/time')
-    parser.add_argument('--months', dest='months', type=str, default=None,
-                        help='Number of months for reporting scheduled assignments')
-    parser.add_argument('--year', dest='year', type=str, default=None, help='Year for reporting scheduled assignments')
-    parser.add_argument('--schedule-cloud', dest='schedcloud', type=str, default=None, help='Schedule cloud')
-    parser.add_argument('--interface-mac', dest='ifmac', type=str, default=None, help='MAC address for --add-interface')
-    parser.add_argument('--interface-ip', dest='ifip', type=str, default=None, help='IP address for --add-interface')
-    parser.add_argument('--interface-port', dest='ifport', type=str, default=None,
-                        help='Switch port for --add-interface')
-    parser.add_argument('--move-hosts', dest='movehosts', action='store_true', default=None,
-                        help='Move hosts if schedule has changed')
-    parser.add_argument('--move-command', dest='movecommand', type=str, default=default_move_command,
-                        help='External command to move a host')
-    parser.add_argument('--dry-run', dest='dryrun', action='store_true', default=None,
-                        help="Don't update state when used with --move-hosts")
-    parser.add_argument('--log-path', dest='logpath', type=str, default=None,
-                        help='Path to QUADS log file')
-    parser.add_argument('--host-type', dest='hosttype', type=str, default=None,
-                        help='Open-ended identifier for host: util, baremetal, aws, openstack, libvirt, etc.')
-    parser.add_argument('--vlan', dest='vlan', type=int, default=None,
-                        help='VLAN id number for public routable network')
-    parser.add_argument('--debug', action='store_true', default=False, help='Show debugging information.')
-    parser.add_argument('--version', dest='version', action='store_true', help='Display version of QUADS')
+    group.add_argument(
+        "--ls-owner",
+        dest="action",
+        action="store_const",
+        const="owner",
+        help="List owners",
+    )
+    group.add_argument(
+        "--ls-cc-users",
+        dest="action",
+        action="store_const",
+        const="ccuser",
+        help="List CC list",
+    )
+    group.add_argument(
+        "--ls-ticket",
+        dest="action",
+        action="store_const",
+        const="ticket",
+        help="List request ticket",
+    )
+    group.add_argument(
+        "--ls-qinq",
+        dest="action",
+        action="store_const",
+        const="qinq",
+        help="List cloud qinq state",
+    )
+    group.add_argument(
+        "--ls-wipe",
+        dest="action",
+        action="store_const",
+        const="wipe",
+        help="List cloud wipe state",
+    )
+    group.add_argument(
+        "--extend",
+        dest="action",
+        action="store_const",
+        const="extend",
+        help="Extend an existing schedule",
+    )
+    group.add_argument(
+        "--shrink",
+        dest="action",
+        action="store_const",
+        const="shrink",
+        help="Shrink an existing schedule",
+    )
+    group.add_argument(
+        "--define-host",
+        dest="hostresource",
+        type=str,
+        default=None,
+        help="Define a host resource",
+    )
+    group.add_argument(
+        "--define-host-details",
+        dest="host_metadata",
+        action="store_true",
+        help="Define a host resource details via yaml",
+    )
+    group.add_argument(
+        "--export-host-details",
+        dest="host_metadata_export",
+        type=str,
+        default=None,
+        help="Path to QUADS log file",
+    )
+    group.add_argument(
+        "--define-cloud",
+        dest="cloudresource",
+        type=str,
+        default=None,
+        help="Define a cloud environment",
+    )
+    group.add_argument(
+        "--mod-cloud", dest="modcloud", type=str, default=None, help="Modify a cloud",
+    )
+    group.add_argument(
+        "--add-schedule",
+        dest="addschedule",
+        action="store_true",
+        help="Define a host reservation",
+    )
+    group.add_argument(
+        "--mod-schedule",
+        dest="modschedule",
+        type=str,
+        default=None,
+        help="Modify a host reservation",
+    )
+    group.add_argument(
+        "--add-interface",
+        dest="addinterface",
+        type=str,
+        default=None,
+        help="Define a host interface",
+    )
+    group.add_argument(
+        "--rm-schedule",
+        dest="rmschedule",
+        type=str,
+        default=None,
+        help="Remove a host reservation",
+    )
+    group.add_argument(
+        "--rm-interface",
+        dest="rminterface",
+        type=str,
+        default=None,
+        help="Remove a host interface",
+    )
+    group.add_argument(
+        "--ls-hosts",
+        dest="action",
+        action="store_const",
+        const="host",
+        help="List all hosts",
+    )
+    group.add_argument(
+        "--ls-clouds",
+        dest="action",
+        action="store_const",
+        const="cloud",
+        help="List all clouds",
+    )
+    group.add_argument(
+        "--rm-host", dest="rmhost", type=str, default=None, help="Remove a host",
+    )
+    group.add_argument(
+        "--rm-cloud", dest="rmcloud", type=str, default=None, help="Remove a cloud"
+    )
+    group.add_argument(
+        "--ls-available",
+        dest="action",
+        action="store_const",
+        const="available",
+        help="List available hosts on a specific time frame",
+    )
+    group.add_argument(
+        "--ls-schedule",
+        dest="action",
+        action="store_const",
+        const="schedule",
+        help="List the host reservations",
+    )
+    group.add_argument(
+        "--ls-interface",
+        dest="action",
+        action="store_const",
+        const="interface",
+        help="List the host interfaces",
+    )
+    group.add_argument(
+        "--ls-vlan",
+        dest="action",
+        action="store_const",
+        const="ls_vlan",
+        help="List the available vlans with the clouds assigned",
+    )
+    group.add_argument(
+        "--find-free-cloud",
+        dest="action",
+        action="store_const",
+        const="free_cloud",
+        help="List available hosts on a specific time frame",
+    )
+    group.add_argument(
+        "--report-available",
+        dest="action",
+        action="store_const",
+        const="report_available",
+        help="QUADS reporting server availability",
+    )
+    group.add_argument(
+        "--report-scheduled",
+        dest="action",
+        action="store_const",
+        const="report_scheduled",
+        help="QUADS reporting detailed scheduled assignments",
+    )
+    group.add_argument(
+        "--report-detailed",
+        dest="action",
+        action="store_const",
+        const="report_detailed",
+        help="QUADS reporting scheduled assignments",
+    )
+    group.add_argument(
+        "--ls-broken",
+        dest="action",
+        action="store_const",
+        const="broken",
+        help="List all hosts marked as broken",
+    )
+
+    time_args = parser.add_mutually_exclusive_group()
+    time_args.add_argument(
+        "-d",
+        "--date",
+        dest="datearg",
+        type=str,
+        default=None,
+        help='date and time to query; e.g. "2016-06-01 08:00"',
+    )
+    time_args.add_argument(
+        "--months",
+        dest="months",
+        type=str,
+        default=None,
+        help="Number of months for reporting scheduled assignments",
+    )
+    time_args.add_argument(
+        "--year",
+        dest="year",
+        type=str,
+        default=None,
+        help="Year for reporting scheduled assignments",
+    )
+    time_args.add_argument(
+        "--weeks",
+        dest="weeks",
+        type=str,
+        default=None,
+        help="Number of weeks to extend an existing schedule",
+    )
+    time_args.add_argument(
+        "--now",
+        dest="now",
+        action="store_true",
+        default=None,
+        help="Now flag for use with --extend or --shrink instead of --week",
+    )
+
+    object_args = parser.add_mutually_exclusive_group()
+    object_args.add_argument(
+        "--host", dest="host", type=str, default=None, help="Specify the host to query",
+    )
+    object_args.add_argument(
+        "--cloud", dest="cloud", type=str, default=None, help="Specify cloud name",
+    )
+
+    parser.add_argument(
+        "--cloud-only",
+        dest="cloudonly",
+        type=str,
+        default=None,
+        help="Limit full report to hosts only in this cloud",
+    )
+    parser.add_argument(
+        "--cloud-owner",
+        dest="cloudowner",
+        type=str,
+        default=None,
+        help="Define environment owner",
+    )
+    parser.add_argument(
+        "--cc-users",
+        dest="ccusers",
+        type=str,
+        default=None,
+        help="Define environment CC list",
+    )
+    parser.add_argument(
+        "--qinq",
+        dest="qinq",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help="Define environment qinq state",
+    )
+    parser.add_argument(
+        "--no-wipe",
+        dest="no_wipe",
+        action="store_false",
+        help="Define no wipe for safeguarding data after assignment",
+    )
+    parser.add_argument(
+        "--wipe",
+        dest="wipe",
+        action="store_true",
+        help="Define wipe for reprovisioning server before assignment",
+    )
+    parser.add_argument(
+        "--cloud-ticket",
+        dest="cloudticket",
+        type=str,
+        default=None,
+        help="Define environment ticket",
+    )
+    parser.add_argument(
+        "--description",
+        dest="description",
+        type=str,
+        default=None,
+        help="Defined description of cloud",
+    )
+    parser.add_argument(
+        "--default-cloud",
+        dest="hostcloud",
+        type=str,
+        default=None,
+        help="Defined default cloud for a host",
+    )
+    parser.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        help="Force host or cloud update when already defined",
+    )
+    parser.add_argument(
+        "--summary",
+        dest="summary",
+        action="store_true",
+        help="Generate a summary report",
+    )
+    parser.add_argument(
+        "--detail",
+        dest="detail",
+        action="store_true",
+        help="Get additional data over the summary",
+    )
+    parser.add_argument(
+        "--full-summary",
+        dest="fullsummary",
+        action="store_true",
+        help="Generate a summary report",
+    )
+    parser.add_argument(
+        "--schedule-start",
+        dest="schedstart",
+        type=str,
+        default=None,
+        help="Schedule start date/time",
+    )
+    parser.add_argument(
+        "--schedule-end",
+        dest="schedend",
+        type=str,
+        default=None,
+        help="Schedule end date/time",
+    )
+    parser.add_argument(
+        "--check",
+        dest="check",
+        action="store_true",
+        default=None,
+        help="Check for cloud extension",
+    )
+    parser.add_argument(
+        "--schedule-cloud",
+        dest="schedcloud",
+        type=str,
+        default=None,
+        help="Schedule cloud",
+    )
+    parser.add_argument(
+        "--interface-mac",
+        dest="ifmac",
+        type=str,
+        default=None,
+        help="MAC address for --add-interface",
+    )
+    parser.add_argument(
+        "--interface-ip",
+        dest="ifip",
+        type=str,
+        default=None,
+        help="IP address for --add-interface",
+    )
+    parser.add_argument(
+        "--interface-port",
+        dest="ifport",
+        type=str,
+        default=None,
+        help="Switch port for --add-interface",
+    )
+    parser.add_argument(
+        "--move-hosts",
+        dest="movehosts",
+        action="store_true",
+        default=None,
+        help="Move hosts if schedule has changed",
+    )
+    parser.add_argument(
+        "--move-command",
+        dest="movecommand",
+        type=str,
+        default=default_move_command,
+        help="External command to move a host",
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="dryrun",
+        action="store_true",
+        default=None,
+        help="Don't update state when used with --move-hosts",
+    )
+    parser.add_argument(
+        "--log-path",
+        dest="logpath",
+        type=str,
+        default=None,
+        help="Path to QUADS log file",
+    )
+    parser.add_argument(
+        "--host-type",
+        dest="hosttype",
+        type=str,
+        default=None,
+        help="Open-ended identifier for host: util, baremetal, aws, openstack, libvirt, etc.",
+    )
+    parser.add_argument(
+        "--vlan",
+        dest="vlan",
+        type=int,
+        default=None,
+        help="VLAN id number for public routable network",
+    )
+    parser.add_argument(
+        "--metadata",
+        dest="metadata",
+        type=str,
+        default=None,
+        help="Path to yml with hosts metadata",
+    )
+    parser.add_argument(
+        "--filter",
+        dest="filter",
+        type=str,
+        default=None,
+        help="Filter search by host metadata",
+    )
+    parser.add_argument(
+        "--mark-broken", action="store_true", default=False, help="Mark host as broken",
+    )
+    parser.add_argument(
+        "--mark-repaired",
+        action="store_true",
+        default=False,
+        help="Mark broken host as repaired",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Show debugging information.",
+    )
+    parser.add_argument(
+        "--version",
+        dest="version",
+        action="store_true",
+        help="Display version of QUADS",
+    )
 
     args = parser.parse_args()
     main(args)

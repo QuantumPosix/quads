@@ -36,14 +36,14 @@ def print_summary():
         '**SUMMARY**',
         '**OWNER**',
         '**REQUEST**',
-        ' &nbsp; &nbsp; **STATUS** &nbsp; &nbsp;'
+        '<span id="status">**STATUS**</span>'
     ]
     if conf["openstack_management"]:
-        _headers.append("**INSTACKENV**")
+        _headers.append("**OSPENV**")
+    if conf["openshift_management"]:
+        _headers.append("**OCPINV**")
     if conf["gather_ansible_facts"]:
         _headers.append("**HWFACTS**")
-    if conf["gather_dell_configs"]:
-        _headers.append("**DELLCFG**")
 
     _summary.append("| %s |\n" % " | ".join(_headers))
     _summary.append("| %s |\n" % " | ".join(["---" for _ in range(len(_headers))]))
@@ -58,7 +58,8 @@ def print_summary():
         desc = "%s (%s)" % (cloud["count"], cloud["description"])
         owner = cloud["owner"]
         ticket = cloud["ticket"]
-        link = "<a href=%s?id=%s target=_blank>%s</a>" % (conf["rt_url"], ticket, ticket)
+        link = "<a href=%s/%s-%s target=_blank>%s</a>" % (
+            conf["ticket_url"], conf["ticket_queue"], ticket, ticket)
         cloud_specific_tag = "%s_%s_%s" % (cloud_name, owner, ticket)
 
         style_tag_end = "</span>"
@@ -66,6 +67,8 @@ def print_summary():
             style_tag_start = '<span style="color:green">'
             instack_link = os.path.join(conf["quads_url"], "cloud", "%s_instackenv.json" % cloud_name)
             instack_text = "download"
+            ocpinv_link = os.path.join(conf["quads_url"], "cloud", "%s_ocpinventory.json" % cloud_name)
+            ocpinv_text = "download"
             status = '<span class="progress" style="margin-bottom:0px"><span role="progressbar" aria-valuenow="100" ' \
                      'aria-valuemin="0" aria-valuemax="100" style="width:100%" class="progress-bar">100%</span></span> '
         else:
@@ -76,6 +79,8 @@ def print_summary():
             style_tag_start = '<span style="color:red">'
             instack_link = "#"
             instack_text = "validating"
+            ocpinv_link = "#"
+            ocpinv_text = "validating"
             if percent < 15:
                 classes = ["progress-bar", "progress-bar-striped", "progress-bar-danger", "active"]
                 status = '<span class="progress" style="margin-bottom:0px"><span role="progressbar" ' \
@@ -103,12 +108,17 @@ def print_summary():
                 ansible_facts_link = os.path.join(conf["quads_url"], "underconstruction")
             if cloud_name == "cloud01":
                 _data.append("")
+                _data.append("")
                 _data.append(status)
                 _data.append("")
             else:
                 _data.append(
                     "<a href=%s target=_blank>%s%s%s</a>"
                     % (instack_link, style_tag_start, instack_text, style_tag_end)
+                )
+                _data.append(
+                    "<a href=%s target=_blank>%s%s%s</a>"
+                    % (ocpinv_link, style_tag_start, ocpinv_text, style_tag_end)
                 )
                 _data.append(status)
                 _data.append(
@@ -120,37 +130,20 @@ def print_summary():
             if cloud_name == "cloud01":
                 if conf["openstack_management"]:
                     _data.append("")
+                if conf["openshift_management"]:
+                    _data.append("")
             else:
                 if conf["openstack_management"]:
                     _data.append(
                         "<a href=%s target=_blank>%s%s%s</a>"
                         % (instack_link, style_tag_start, instack_text, style_tag_end)
                     )
+                if conf["openshift_management"]:
+                    _data.append(
+                        "<a href=%s target=_blank>%s%s%s</a>"
+                        % (ocpinv_link, style_tag_start, ocpinv_text, style_tag_end)
+                    )
 
-        if conf["gather_dell_configs"]:
-            dellstyle_tag_end = "</span>"
-            dell_config_path = os.path.join(
-                conf["json_web_path"],
-                "%s-%s-%s-dellconfig.html" % (cloud_name, owner, ticket)
-            )
-            if os.path.exists(dell_config_path):
-                dellstyle_tag_start = '<span style="color:green">'
-                dellconfig_link = os.path.join(
-                    conf["quads_url"], "cloud", "%s-%s-%s-dellconfig.html" % (cloud_name, owner, ticket)
-                )
-                dellconfig_text = "view"
-            else:
-                dellstyle_tag_start = '<span style="color:red">'
-                dellconfig_link = os.path.join(conf["quads_url"], "underconstruction")
-                dellconfig_text = "unavailable"
-
-            if cloud_name == "cloud01":
-                _data.append("")
-            else:
-                _data.append(
-                    "<a href=%s target=_blank>%s%s%s</a>"
-                    % (dellconfig_link, dellstyle_tag_start, dellconfig_text, dellstyle_tag_end)
-                )
         _summary.append("| %s |\n" % " | ".join(_data))
 
     _host_response = requests.get(os.path.join(API_URL, "host"))
@@ -168,25 +161,19 @@ def print_summary():
     return _summary
 
 
-def print_unmanaged(hosts, broken_hosts):
+def print_unmanaged(hosts):
     lines = ["\n", '### <a name="unmanaged"></a>Unmanaged systems ###\n', "\n"]
     _headers = ["**SystemHostname**", "**OutOfBand**"]
     lines.append("| %s |\n" % " | ".join(_headers))
     lines.append("| %s |\n" % " | ".join(["---" for _ in range(len(_headers))]))
     for host, properties in hosts.items():
         real_host = host[5:]
-        if not broken_hosts.get(real_host, False):
+        host_obj = Host.objects(name=real_host).first()
+        if not host_obj:
             short_host = real_host.split(".")[0]
-
-            _host_response = requests.get(os.path.join(API_URL, "host?name=%s" % real_host))
-            _host = {}
-            if _host_response.status_code == 200:
-                _host = _host_response.json()
-
-            if not _host or "name" not in _host:
-                lines.append(
-                    "| %s | <a href=http://%s/ target=_blank>console</a> |\n" % (short_host, host)
-                )
+            lines.append(
+                "| %s | <a href=http://%s/ target=_blank>console</a> |\n" % (short_host, host)
+            )
     return lines
 
 
@@ -195,9 +182,9 @@ def print_faulty(broken_hosts):
     _headers = ["**SystemHostname**", "**OutOfBand**"]
     lines.append("| %s |\n" % " | ".join(_headers))
     lines.append("| %s |\n" % " | ".join(["---" for _ in range(len(_headers))]))
-    for host, properties in broken_hosts.items():
-        short_host = host.split(".")[0]
-        lines.append("| %s | <a href=http://mgmt-%s/ target=_blank>console</a> |\n" % (short_host, host))
+    for host in broken_hosts:
+        short_host = host.name.split(".")[0]
+        lines.append("| %s | <a href=http://mgmt-%s/ target=_blank>console</a> |\n" % (short_host, host.name))
     return lines
 
 
@@ -252,12 +239,8 @@ def main():
     all_hosts = loop.run_until_complete(foreman.get_all_hosts())
     blacklist = re.compile("|".join([re.escape(word) for word in conf["exclude_hosts"].split("|")]))
 
-    broken_hosts = loop.run_until_complete(foreman.get_broken_hosts())
-    domain_broken_hosts = {
-        host: properties
-        for host, properties in broken_hosts.items()
-        if conf["domain"] in host
-    }
+    broken_hosts = Host.objects(broken=True)
+    domain_broken_hosts = [host for host in broken_hosts if conf["domain"] in host.name]
 
     mgmt_hosts = {}
     for host, properties in all_hosts.items():
@@ -290,7 +273,7 @@ def main():
             lines.extend(add_row(host))
         lines.append("\n")
 
-    lines.extend(print_unmanaged(mgmt_hosts, domain_broken_hosts))
+    lines.extend(print_unmanaged(mgmt_hosts))
     lines.extend(print_faulty(domain_broken_hosts))
 
     _full_path = os.path.join(conf["wp_wiki_git_repo_path"], "assignments.md")

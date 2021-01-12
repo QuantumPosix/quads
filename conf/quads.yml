@@ -11,7 +11,7 @@ data_dir: .
 # display name for QUADS email notifications
 mail_display_name: "QUADS Scheduler"
 # set header for User-Agent:
-mail_user_agent: "Rufus Postman 1.1.2"
+mail_user_agent: "Rufus Postman 1.1.4"
 domain: example.com
 log: /opt/quads/log/quads.log
 quads_base_url: http://127.0.0.1:8080/
@@ -19,11 +19,6 @@ quads_base_url: http://127.0.0.1:8080/
 # used for reporting
 # add your email here to receive copies of notification emails
 report_cc: someuser@example.com, someuser@example.com, someuser@example.com, someuser@example.com
-
-# notification options
-# location for notification stub files
-# these are markers that track notification send status
-report_dir: /opt/quads/data/report
 
 # set to true to receive notifications when:
 # 1) upon cloud definition for a future workload
@@ -63,14 +58,21 @@ wp_wiki_vlans_page_id: 14244
 wp_wiki_git_manage: false
 wp_wiki_git_repo_path: /opt/quads/git/wiki
 
-# (optional RT location)
-rt_url: https://engineering.example.com/rt/Ticket/Display.html
+# (optional ticket system URL) in this case we're using JIRA
+ticket_url: https://projects.engineering.example.com/browse
+# (optional ticket queue name) this is typically the ticket queue
+# name or abbreviation in the case of JIRA
+ticket_queue: SCALELAB
 
 # this is used in some of the wiki generate for the links
 quads_url: http://quads.scalelab.example.com
 # url for a request form if you use one
 # e.g. http://scalelab.example.com
 quads_request_url:
+
+# Deadline day you'd like extension requests for assignments
+# to be submitted prior to, e.g. Wednesday
+quads_request_deadline_day:
 
 # Foreman Specific Variables
 # foreman URL
@@ -80,17 +82,10 @@ foreman_url: http://foreman.example.com/hosts/
 foreman_api_url: https://foreman.example.com/api/v2
 foreman_username: admin
 foreman_password: password
-
+# more foreman settings for your OS, medium, partition table
 foreman_default_os: "RHEL 7"
 foreman_default_ptable: "generic-rhel7"
 foreman_default_medium: "RHEL Local"
-
-# Foreman host health checks
-# by setting the Foreman host parameter: broken_state: true
-# you can mark certain systems as broken and keep them from being scheduled
-# e.g.  hammer host set-parameter --host host01 --name broken_state --value true
-# set the following variable to true if you want this functionality
-foreman_check_host_health:
 
 # Foreman RBAC fix ignore
 # variable to pass cloud names to be excluded from foreman_heal
@@ -115,14 +110,6 @@ json_retention_days: 0
 # an HTMl page, you need ansible-cmdb rpm for this functionality which can be
 # got from https://github.com/fboender/ansible-cmdb/releases
 gather_ansible_facts: false
-
-# Whether or not you want the QUADS host to gather and display dell configs
-# in an HTML page.  This is done over ssh using racadm commands. This presumes
-# a particular hostname convention that splits your hosts into three elements:
-# e.g. <rack>-<location>-<hosttype>.<yourdomain>, where hosttype is what is
-# checked against several Dell types.  Be careful as this is environment specific
-# and may not work in all environments.  Default is false.
-gather_dell_configs: false
 
 # this is where we place the generated ansible configuration management database
 # html
@@ -191,6 +178,24 @@ visual_colors:
   cloud30: "#e6beff"
   cloud31: "#9A6324"
   cloud32: "#fffac8"
+  cloud33: "#800000"
+  cloud34: "#aaffc3"
+  cloud35: "#808000"
+  cloud36: "#e6194B"
+  cloud37: "#3cb44b"
+  cloud38: "#ffe119"
+  cloud39: "#4363d8"
+  cloud40: "#f58231"
+  cloud41: "#911eb4"
+  cloud42: "#42d4f4"
+  cloud43: "#bfef45"
+  cloud44: "#f032e6"
+  cloud45: "#fabebe"
+  cloud46: "#469990"
+  cloud47: "#e6beff"
+  cloud48: "#9A6324"
+  cloud49: "#fffac8"
+  cloud50: "#800000"
 
 # Do you have managed PDUs?
 pdu_management: false
@@ -199,6 +204,11 @@ pdu_management: false
 # Setting this to false will prevent quads from generating and
 # displaying instack env json files on quads wiki
 openstack_management: false
+
+# OpenShift variable for generation of inventory files
+# Setting this to false will prevent quads from generating and
+# displaying ocpinventory files on quads wiki
+openshift_management: false
 
 # Validation grace period in minutes
 # This gives the validation logic some time for the hosts to complete
@@ -209,3 +219,27 @@ validation_grace_period: 120
 # sw_vlan_first - The first VLAN ID used for the first interface of cloud01
 # this defaults to 1100 unless set otherwise.
 sw_vlan_first: 1100
+
+# default behavior is to change wipe back to true when all schedules expire
+# Use this carefully! Setting this to False will leave "wipe" behavior alone which
+# could cause issues unless you are certain what you are doing.
+# In most cases, leave it commented, or set to True
+default_wipe: True
+
+# If you're using metadata model / search you want to add any system models
+# here.  Please see docs/quads-host-metadata-search.md
+models: R620,R630,R640,R930,R730XD,FC640,6018R,6048R,1029U-TRTP,1029U-TN10RT,1029P,5039MS,6049P
+
+# Amount of hours for locking a cloud for redefinition
+cloud_reservation_lock: 48
+
+# Continue to send notifications for expiration until assignments are
+# actually extended.  We set this because our ticket system (JIRA) is not tied
+# into QUADS to silence expiration notices if an expiration request is
+# submitted, only when it's executed will notifications cease.
+# Unless you have done custom modification of notify.py/QUADS to tie toggling
+# MongoDB flags for 'message' you want to leave this alone.
+# Leaving the below to True will include a message in expiration notifications
+# that users can ignore future expiration warnings if they have already
+# submitted an extension request but it hasn't been executed yet.
+quads_notify_until_extended: True

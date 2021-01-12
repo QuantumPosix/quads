@@ -66,7 +66,7 @@ class CloudHistory(Document):
     description = StringField()
     owner = StringField()
     ticket = StringField()
-    qinq = BooleanField()
+    qinq = IntField()
     wipe = BooleanField()
     ccuser = ListField()
     vlan_id = LongField()
@@ -81,9 +81,16 @@ class CloudHistory(Document):
 
     @staticmethod
     def prep_data(data):
-        for flag in ['provisioned', 'validated', 'vlan']:
+        for flag in ['provisioned', 'validated', 'last_redefined']:
             if flag in data:
                 data.pop(flag)
+
+        if 'vlan' in data:
+            if type(data.get('vlan')) == str:
+                data['vlan_id'] = int(data.get('vlan'))
+            elif type(data.get('vlan')) == Vlan:
+                data['vlan_id'] = data.get('vlan').vlan_id
+            data.pop('vlan')
 
         params = ['name', 'description', 'owner', 'ticket']
         result, data = param_check(data, params)
@@ -96,12 +103,13 @@ class Cloud(Document):
     description = StringField()
     owner = StringField(default='quads')
     ticket = StringField(default='000000')
-    qinq = BooleanField(default=False)
+    qinq = IntField(default=0)
     wipe = BooleanField(default=True)
     ccuser = ListField()
     provisioned = BooleanField(default=False)
     validated = BooleanField(default=False)
     vlan = ReferenceField(Vlan)
+    last_redefined = DateTimeField(default=datetime.datetime.now())
     meta = {
         'indexes': [
             {
@@ -112,33 +120,43 @@ class Cloud(Document):
     }
 
     @staticmethod
-    def prep_data(data):
+    def prep_data(data, fields=None, mod=False):
         if 'vlan' in data and data['vlan']:
             vlan_id = data.pop('vlan')
-            vlan_obj = Vlan.objects(vlan_id=vlan_id).first()
-            if not vlan_obj:
-                return ["No VLAN object defined with id: %s" % vlan_id], {}
-            cloud_obj = Cloud.objects(vlan=vlan_obj).first()
-            if cloud_obj:
-                return ["VLAN %s already in use." % vlan_id], {}
-            data["vlan"] = vlan_obj
-        else:
-            data["vlan"] = None
+            try:
+                int(vlan_id)
+            except ValueError:
+                data['vlan'] = None
+            else:
+                vlan_obj = Vlan.objects(vlan_id=vlan_id).first()
+                if not vlan_obj:
+                    return ["No VLAN object defined with id: %s" % vlan_id], {}
+                cloud_obj = Cloud.objects(vlan=vlan_obj).first()
+                if cloud_obj:
+                    return ["VLAN %s already in use." % vlan_id], {}
+                data["vlan"] = vlan_obj
         if 'ccuser' in data:
             data['ccuser'] = data['ccuser'].split()
-        if 'qinq' in data:
-            if str(data['qinq']).lower() == "false":
-                data["qinq"] = False
-            else:
-                data["qinq"] = True
         if 'wipe' in data:
             if str(data['wipe']).lower() == "false":
                 data["wipe"] = False
             else:
                 data["wipe"] = True
 
-        params = ['name', 'description', 'owner']
-        result, data = param_check(data, params)
+        if not mod:
+            data['validated'] = False
+            data['last_redefined'] = datetime.datetime.now()
+
+        if not fields:
+            fields = ['name', 'description', 'owner']
+
+        fields = list(fields)
+        if 'qinq' in fields:
+            fields.remove('qinq')
+        if 'wipe' in fields:
+            fields.remove('wipe')
+
+        result, data = param_check(data, fields)
 
         return result, data
 
@@ -157,11 +175,26 @@ class Notification(Document):
     seven_days = BooleanField(default=False)
 
 
+class Disk(EmbeddedDocument):
+    disk_type = StringField()
+    size_gb = LongField()
+    count = IntField()
+
+    @staticmethod
+    def prep_data(data):
+        _fields = ['disk_type', 'size_gb', 'count']
+        result, data = param_check(data, _fields)
+
+        return result, data
+
+
 class Interface(EmbeddedDocument):
     name = StringField()
     mac_address = StringField()
     ip_address = StringField()
     switch_port = StringField()
+    speed = LongField()
+    maintenance = BooleanField(default=False)
 
     @staticmethod
     def prep_data(data):
@@ -173,6 +206,7 @@ class Interface(EmbeddedDocument):
 
 class Host(Document):
     name = StringField(unique=True)
+    model = StringField()
     default_cloud = ReferenceField(Cloud)
     cloud = ReferenceField(Cloud)
     host_type = StringField()
@@ -181,6 +215,9 @@ class Host(Document):
     build = BooleanField(default=False)
     validated = BooleanField(default=False)
     last_build = DateTimeField()
+    disks = ListField(EmbeddedDocumentField(Disk))
+    switch_config_applied = BooleanField(default=False)
+    broken = BooleanField(default=False)
     meta = {
         'indexes': [
             {
@@ -191,7 +228,7 @@ class Host(Document):
     }
 
     @staticmethod
-    def prep_data(data):
+    def prep_data(data, fields=None):
         if 'cloud' in data:
             _cloud_obj = Cloud.objects(name=data['cloud']).first()
             if _cloud_obj:
@@ -206,8 +243,10 @@ class Host(Document):
                     data['cloud'] = _default_cloud_obj
             else:
                 return ['Cloud %s does not exist.' % data['default_cloud']], {}
+        if not fields:
+            fields = ['name', 'host_type']
 
-        result, data = param_check(data, ['name', 'host_type'])
+        result, data = param_check(data, fields)
 
         return result, data
 
@@ -268,9 +307,13 @@ class Schedule(Document):
         return True
 
     @queryset_manager
-    def future_schedules(self, queryset, host):
+    def future_schedules(self, queryset, host=None, cloud=None):
         now = datetime.datetime.now()
-        _query = Q(host=host) & Q(end__gte=now)
+        _query = Q(end__gte=now)
+        if host:
+            _query = _query & Q(host=host)
+        if cloud:
+            _query = _query & Q(cloud=cloud)
         return queryset.filter(_query)
 
     @queryset_manager

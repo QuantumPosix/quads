@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+    {% block title %}QUADS Available Hosts{% endblock %}
+
+    {% block styles %}
+    {{ super() }}
+    {% endblock %}
+
+    {% block scripts %}
+    {{ super() }}
+    <script>
+    $(document).ready( function () {
+        var table = $('#results').DataTable({
+            dom: 'Bfrtip',
+            buttons: [
+                'selectAll',
+                'selectNone',
+                {
+                    extend: 'copy',
+                    title: null,
+                    header: false,
+                    exportOptions: {columns: [1, ':selected']}
+                }
+            ],
+            select: {
+                style: 'multi'
+            }
+        });
+    } );
+    </script>
+    <script>
+    $(document).ready( function () {
+        now = new Date();
+        sunday = new Date();
+        future = new Date();
+        days_till_next_sunday = 7 - now.getDay();
+        now.setDate(now.getDate() + days_till_next_sunday);
+        sunday.setDate(sunday.getDate() + days_till_next_sunday);
+        $("#start").datepicker({
+            minDate: 0,
+            onSelect: function(selected){
+                $("#end").datepicker("option","minDate", selected);
+            }
+        });
+        $("#start").datepicker("setDate", sunday);
+        future.setDate(sunday.getDate() + 14)
+        $("#end").datepicker({ minDate: 0 });
+        $("#end").datepicker("setDate", future);
+    });
+    </script>
+    {% endblock %}
+
+    {% block page_content %}
+        <h2>QUADS Available Hosts</h2>
+        <div class="container-fluid">
+            <div class="row">
+                <div class="col-md-3">
+                    {% from "_formhelpers.html" import render_field %}
+                    <form method="post" id="search">
+                        {{ render_field(form.model) }}
+                        <br/>
+                        <br/>
+                        {{ form.start.label }}: {{ form.start(class_="dtpick") }}
+                        <br/>
+                        <br/>
+                        {{ form.end.label }}:   {{ form.end(class_="dtpick") }}
+                        <br/>
+                        <br/>
+                        <input type="submit" value="Search">
+                    </form>
+                </div>
+                <div class="col-md-9">
+                    <table class="table" id="results">
+                        <thead>
+                            <tr>
+                                <th scope="col">#</th>
+                                <th scope="col">Hostname</th>
+                                <th scope="col">Model</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for host in available_hosts.json %}
+                            <tr>
+                                <th scope="row">{{ loop.index }}</th>
+                                <td>{{ host["name"] }}</td>
+                                <td>{{ host["model"] }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    {% endblock %}

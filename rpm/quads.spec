@@ -14,7 +14,7 @@
 
 %define name quads-dev
 %define reponame quads
-%define version 1.1.2
+%define version 1.1.4.1
 %define build_timestamp %{lua: print(os.date("%Y%m%d"))}
 
 Summary: Automated future scheduling, documentation, end-to-end provisioning and assignment of servers and networks.
@@ -39,6 +39,10 @@ Requires: python3-aiohttp >= 3.1
 Requires: git >= 2.1
 Requires: ipmitool >= 1.8.0
 Requires: python3-paramiko >= 2.3
+Requires: python3-flask >= 1.0
+Requires: python3-flask-bootstrap >= 3.3.7.1
+Requires: python3-flask-wtf >= 0.12
+Requires: python3-wtforms >= 2.2.0
 Requires: python3-wordpress-xmlrpc >= 2.2
 Requires: python3-pexpect >= 4.2
 Requires: python3-ipdb >= 0.10
@@ -76,8 +80,9 @@ mkdir %{buildroot}%{prefix} -p
 mkdir %{buildroot}/etc/systemd/system/ -p
 mkdir %{buildroot}/etc/profile.d/ -p
 mkdir %{buildroot}/etc/logrotate.d/ -p
-tar cf - bin quads/*.py quads/tools/*.py quads/templates/* quads/*.py conf | ( cd %{buildroot}%{prefix} ; tar xvpBf - )
+tar cf - bin quads/*.py quads/tools/*.py quads/templates/* quads/templates/static/* quads/*.py conf web | ( cd %{buildroot}%{prefix} ; tar xvpBf - )
 cp -rf systemd/quads-server.service %{buildroot}/etc/systemd/system/
+cp -rf systemd/quads-web.service %{buildroot}/etc/systemd/system/
 cp -rf conf/logrotate_quads.conf %{buildroot}/etc/logrotate.d/
 mkdir -p %{buildroot}/var/www/html/visual/
 echo 'export PATH="/opt/quads/bin:$PATH"' > %{buildroot}/etc/profile.d/quads.sh
@@ -87,20 +92,26 @@ echo 'export PYTHONPATH="$PYTHONPATH:/opt/quads/"' >> %{buildroot}/etc/profile.d
 rm -rf %{buildroot}
 
 %files
+/etc/systemd/system/quads-web.service
 /etc/systemd/system/quads-server.service
 /etc/profile.d/quads.sh
 /opt/quads/bin/*
+/opt/quads/web/*
+/opt/quads/web/templates/*
 /opt/quads/quads/*
 /opt/quads/quads/tools/*
 /opt/quads/quads/templates/*
+/opt/quads/quads/templates/static/*
 /opt/quads/conf/logrotate_quads.conf
 %config(noreplace) /opt/quads/conf/quads.yml
 %config(noreplace) /opt/quads/conf/vlans.yml
+%config(noreplace) /opt/quads/conf/hosts_metadata.yml
 %config(noreplace) /opt/quads/conf/idrac_interfaces.yml
 %config(noreplace) /etc/logrotate.d/logrotate_quads.conf
 
 %post
 /usr/bin/systemctl enable quads-server
+/usr/bin/systemctl enable quads-web
 /usr/bin/systemctl enable mongod
 /usr/bin/systemctl enable httpd
 /usr/bin/systemctl enable haveged
@@ -110,10 +121,33 @@ source /etc/profile.d/quads.sh
 if [ "$1" -eq 0 ]; then
   /usr/bin/systemctl stop quads-server
   /usr/bin/systemctl disable quads-server
+  /usr/bin/systemctl stop quads-web
+  /usr/bin/systemctl disable quads-web
 fi;
 :;
 
 %changelog
+
+* Thu Dec 17 2020 Will Foster <wfoster@redhat.com>
+- 1.1.4.1 release
+- added --extend and --shrink
+- small set of bug fixes
+
+* Tue Nov 24 2020 Will Foster <wfoster@redhat.com>
+- 1.1.4 release
+- bare-metal host metadata model implemented
+- quads-cli now has --mod-cloud functionality
+- quads-cli now has --extend-cloud functionality
+- quads-cli manages broken systems now with
+  --mark-broken, --mark-repaired and --ls-broken
+- asyncio enhancements
+- flask-based --ls-available ui tech preview, new
+  service 'quads-web'
+- --ls-available now has --filter capability
+- bug fixes for quads and badfish
+
+* Tue Apr 07 2020 Will Foster <wfoster@redhat.com>
+- 1.1.3 release
 
 * Wed Jan 08 2020 Will Foster <wfoster@redhat.com>
 - 1.1.2 release
