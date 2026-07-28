@@ -16,34 +16,44 @@ quads = QuadsApi(Config)
 
 
 class RoCEConfigurator:
-    def __init__(self, cloud_name, action, dry_run=False):
-        self.cloud_name = cloud_name
+    def __init__(self, hostname, action, interfaces=None, dry_run=False):
+        self.hostname = hostname
         self.action = action
+        self.interfaces = interfaces
         self.dry_run = dry_run
 
-    def _get_switch_map(self):
-        assignment = quads.get_active_cloud_assignment(self.cloud_name)
-        if not assignment:
-            logger.error("No active assignment found for cloud: %s", self.cloud_name)
+    def _get_host(self):
+        host = quads.get_host(self.hostname)
+        if not host:
+            logger.error("Host not found: %s", self.hostname)
             return None
+        if not host.interfaces:
+            logger.error("Host %s has no interfaces defined", self.hostname)
+            return None
+        return host
 
-        hosts = quads.filter_hosts({"cloud": self.cloud_name, "retired": False})
-        if not hosts:
-            logger.error("No hosts found for cloud: %s", self.cloud_name)
+    def _get_switch_map(self, host):
+        switch_map = defaultdict(list)
+        for interface in host.interfaces:
+            switch_map[interface.switch_ip].append(interface)
+        return switch_map
+
+    def _get_filtered_switch_map(self, host):
+        available = {iface.name for iface in host.interfaces}
+        requested = set(self.interfaces)
+        missing = requested - available
+        if missing:
+            logger.error(
+                "Interfaces not found on host %s: %s",
+                self.hostname,
+                ", ".join(sorted(missing)),
+            )
             return None
 
         switch_map = defaultdict(list)
-        for host in hosts:
-            if not host.interfaces:
-                logger.warning("Host %s has no interfaces defined", host.name)
-                continue
-            for interface in host.interfaces:
+        for interface in host.interfaces:
+            if interface.name in requested:
                 switch_map[interface.switch_ip].append(interface)
-
-        if not switch_map:
-            logger.error("No interfaces found across hosts in cloud: %s", self.cloud_name)
-            return None
-
         return switch_map
 
     def run(self):
@@ -56,13 +66,14 @@ class RoCEConfigurator:
         return dispatch[self.action]()
 
     def install_roce(self):
-        switch_map = self._get_switch_map()
-        if switch_map is None:
+        host = self._get_host()
+        if host is None:
             return False
 
+        switch_map = self._get_switch_map(host)
         logger.info(
-            "Installing base RoCE config for cloud %s: %d switch(es)",
-            self.cloud_name,
+            "Installing base RoCE config for host %s: %d switch(es)",
+            self.hostname,
             len(switch_map),
         )
 
@@ -102,13 +113,14 @@ class RoCEConfigurator:
         return all_success
 
     def uninstall_roce(self):
-        switch_map = self._get_switch_map()
-        if switch_map is None:
+        host = self._get_host()
+        if host is None:
             return False
 
+        switch_map = self._get_switch_map(host)
         logger.info(
-            "Uninstalling base RoCE config for cloud %s: %d switch(es)",
-            self.cloud_name,
+            "Uninstalling base RoCE config for host %s: %d switch(es)",
+            self.hostname,
             len(switch_map),
         )
 
@@ -145,20 +157,27 @@ class RoCEConfigurator:
         return all_success
 
     def configure(self):
-        switch_map = self._get_switch_map()
+        host = self._get_host()
+        if host is None:
+            return False
+
+        switch_map = self._get_filtered_switch_map(host)
         if switch_map is None:
             return False
 
         logger.info(
-            "Configuring RoCE interfaces for cloud %s: %d switch(es)",
-            self.cloud_name,
+            "Configuring RoCE interfaces for host %s: %d switch(es)",
+            self.hostname,
             len(switch_map),
         )
 
         all_success = True
         for switch_ip, interfaces in switch_map.items():
             if self.dry_run:
-                logger.info("[DRY RUN] Would configure interfaces on switch: %s", switch_ip)
+                logger.info(
+                    "[DRY RUN] Would configure interfaces on switch: %s",
+                    switch_ip,
+                )
                 for iface in interfaces:
                     logger.info(
                         "[DRY RUN] Would apply interface config for: %s",
@@ -203,13 +222,17 @@ class RoCEConfigurator:
         return all_success
 
     def remove(self):
-        switch_map = self._get_switch_map()
+        host = self._get_host()
+        if host is None:
+            return False
+
+        switch_map = self._get_filtered_switch_map(host)
         if switch_map is None:
             return False
 
         logger.info(
-            "Removing RoCE interface configs for cloud %s: %d switch(es)",
-            self.cloud_name,
+            "Removing RoCE interface configs for host %s: %d switch(es)",
+            self.hostname,
             len(switch_map),
         )
 
@@ -256,8 +279,14 @@ class RoCEConfigurator:
 
 
 def main():  # pragma: no cover
-    parser = argparse.ArgumentParser(description="Manage RoCE configuration on switches for a QUADS cloud")
-    parser.add_argument("--cloud", required=True, help="Cloud name (e.g., cloud02)")
+    parser = argparse.ArgumentParser(description="Manage RoCE configuration on switches for a QUADS host")
+    parser.add_argument("--host", required=True, help="Hostname (e.g., host01.example.com)")
+    parser.add_argument(
+        "--interfaces",
+        type=str,
+        default=None,
+        help="Comma-separated interface names (e.g., em1,em3)",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -296,7 +325,14 @@ def main():  # pragma: no cover
 
     args = parser.parse_args()
 
-    configurator = RoCEConfigurator(args.cloud, args.action, dry_run=args.dry_run)
+    if args.action in ("configure", "remove") and not args.interfaces:
+        parser.error(f"--interfaces is required for --{args.action.replace('_', '-')}")
+
+    iface_list = None
+    if args.interfaces:
+        iface_list = [i.strip() for i in args.interfaces.split(",")]
+
+    configurator = RoCEConfigurator(args.host, args.action, interfaces=iface_list, dry_run=args.dry_run)
     success = configurator.run()
     sys.exit(0 if success else 1)
 
