@@ -97,7 +97,7 @@ class JuniperRoCE:
 
     def has_base_config(self):
         try:
-            ssh = SSHHelper(self.ip_address, Config["junos_username"])
+            ssh = SSHHelper(self.ip_address, Config.plugins["juniper"]["username"])
             success, output = ssh.run_cmd(
                 "show configuration class-of-service | display set | match STORAGE-CLASSIFIER"
             )
@@ -114,7 +114,9 @@ class JuniperRoCE:
     def connect(self):
         logger.debug("Connecting to switch: %s", self.ip_address)
         try:
-            self.child = pexpect.spawn(f'ssh -o StrictHostKeyChecking=no {Config["junos_username"]}@{self.ip_address}')
+            self.child = pexpect.spawn(
+                f'ssh -o StrictHostKeyChecking=no {Config.plugins["juniper"]["username"]}@{self.ip_address}'
+            )
             self.child.expect(">")
         except pexpect.exceptions.TIMEOUT:
             raise JuniperRoCEException("Timeout trying to connect via SSH")
