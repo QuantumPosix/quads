@@ -97,8 +97,7 @@ class TestJuniperRoCE:
         mock_spawn.return_value = Mock()
         juniper = JuniperRoCE(self.ip_address)
         juniper.connect()
-        result = juniper.apply_base_config()
-        assert result is True
+        assert juniper.apply_base_config() is True
         sent = [c.args[0] for c in juniper.child.sendline.call_args_list]
         for cmd in BASE_CONFIG_COMMANDS:
             assert cmd in sent
@@ -126,8 +125,7 @@ class TestJuniperRoCE:
         mock_spawn.return_value = Mock()
         juniper = JuniperRoCE(self.ip_address)
         juniper.connect()
-        result = juniper.apply_interface_config("et-0/0/7:1")
-        assert result is True
+        assert juniper.apply_interface_config("et-0/0/7:1") is True
         sent = [c.args[0] for c in juniper.child.sendline.call_args_list]
         for template in INTERFACE_CONFIG_TEMPLATE:
             assert template.format(switch_port="et-0/0/7:1") in sent
@@ -221,25 +219,154 @@ class TestRoCEConfigurator:
         host.interfaces = interfaces
         return host
 
-    # Host validation tests
+    # --install-roce tests (uses --switch / --sw-list)
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_single_switch(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = False
+        mock_instance.apply_base_config.return_value = True
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1"])
+        assert configurator.run() is True
+        mock_juniper_cls.assert_called_once_with("10.0.0.1")
+        mock_instance.apply_base_config.assert_called_once()
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_multiple_switches(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = False
+        mock_instance.apply_base_config.return_value = True
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1", "10.0.0.2"])
+        assert configurator.run() is True
+        assert mock_juniper_cls.call_count == 2
+        assert mock_instance.apply_base_config.call_count == 2
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_skips_existing(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = True
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1"])
+        assert configurator.run() is True
+        mock_instance.apply_base_config.assert_not_called()
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_dry_run(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1"], dry_run=True)
+        assert configurator.run() is True
+        mock_juniper_cls.assert_not_called()
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_connection_failure(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.connect.side_effect = JuniperRoCEException("Fail")
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1"])
+        assert configurator.run() is False
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_install_roce_apply_failure(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = False
+        mock_instance.apply_base_config.return_value = False
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("install_roce", switches=["10.0.0.1"])
+        assert configurator.run() is False
+
+    # --uninstall-roce tests (uses --switch / --sw-list)
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_uninstall_roce_removes_base(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = True
+        mock_instance.remove_base_config.return_value = True
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("uninstall_roce", switches=["10.0.0.1"])
+        assert configurator.run() is True
+        mock_instance.remove_base_config.assert_called_once()
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_uninstall_roce_skips_missing(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = False
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("uninstall_roce", switches=["10.0.0.1"])
+        assert configurator.run() is True
+        mock_instance.remove_base_config.assert_not_called()
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_uninstall_roce_connection_failure(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.connect.side_effect = JuniperRoCEException("Fail")
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("uninstall_roce", switches=["10.0.0.1"])
+        assert configurator.run() is False
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_uninstall_roce_remove_failure(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        mock_instance = MagicMock()
+        mock_instance.has_base_config.return_value = True
+        mock_instance.remove_base_config.return_value = False
+        mock_juniper_cls.return_value = mock_instance
+
+        configurator = RoCEConfigurator("uninstall_roce", switches=["10.0.0.1"])
+        assert configurator.run() is False
+
+    @patch("quads.tools.roce.JuniperRoCE")
+    def test_uninstall_roce_dry_run(self, mock_juniper_cls):
+        from quads.tools.roce import RoCEConfigurator
+
+        configurator = RoCEConfigurator("uninstall_roce", switches=["10.0.0.1"], dry_run=True)
+        assert configurator.run() is True
+        mock_juniper_cls.assert_not_called()
+
+    # --configure tests (uses --host + --interfaces)
 
     @patch("quads.tools.roce.quads")
-    def test_host_not_found(self, mock_quads):
+    def test_configure_host_not_found(self, mock_quads):
         from quads.tools.roce import RoCEConfigurator
 
         mock_quads.get_host.return_value = None
-        configurator = RoCEConfigurator("host01", "install_roce")
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1"])
         assert configurator.run() is False
 
     @patch("quads.tools.roce.quads")
-    def test_host_no_interfaces(self, mock_quads):
+    def test_configure_host_no_interfaces(self, mock_quads):
         from quads.tools.roce import RoCEConfigurator
 
         mock_quads.get_host.return_value = self._make_host("host01", [])
-        configurator = RoCEConfigurator("host01", "install_roce")
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1"])
         assert configurator.run() is False
-
-    # Interface validation tests
 
     @patch("quads.tools.roce.quads")
     def test_configure_interface_not_found(self, mock_quads):
@@ -247,166 +374,8 @@ class TestRoCEConfigurator:
 
         iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
         mock_quads.get_host.return_value = self._make_host("host01", [iface])
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1", "em99"])
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1", "em99"])
         assert configurator.run() is False
-
-    # --install-roce tests
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_install_roce_applies_base(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = False
-        mock_instance.apply_base_config.return_value = True
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "install_roce")
-        assert configurator.run() is True
-        mock_instance.apply_base_config.assert_called_once()
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_install_roce_skips_existing(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = True
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "install_roce")
-        assert configurator.run() is True
-        mock_instance.apply_base_config.assert_not_called()
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_install_roce_dry_run(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        configurator = RoCEConfigurator("host01", "install_roce", dry_run=True)
-        assert configurator.run() is True
-        mock_juniper_cls.assert_not_called()
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_install_roce_connection_failure(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.connect.side_effect = JuniperRoCEException("Fail")
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "install_roce")
-        assert configurator.run() is False
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_install_roce_apply_failure(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = False
-        mock_instance.apply_base_config.return_value = False
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "install_roce")
-        assert configurator.run() is False
-
-    # --uninstall-roce tests
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_uninstall_roce_removes_base(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = True
-        mock_instance.remove_base_config.return_value = True
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "uninstall_roce")
-        assert configurator.run() is True
-        mock_instance.remove_base_config.assert_called_once()
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_uninstall_roce_skips_missing(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = False
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "uninstall_roce")
-        assert configurator.run() is True
-        mock_instance.remove_base_config.assert_not_called()
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_uninstall_roce_connection_failure(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.connect.side_effect = JuniperRoCEException("Fail")
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "uninstall_roce")
-        assert configurator.run() is False
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_uninstall_roce_remove_failure(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        mock_instance = MagicMock()
-        mock_instance.has_base_config.return_value = True
-        mock_instance.remove_base_config.return_value = False
-        mock_juniper_cls.return_value = mock_instance
-
-        configurator = RoCEConfigurator("host01", "uninstall_roce")
-        assert configurator.run() is False
-
-    @patch("quads.tools.roce.JuniperRoCE")
-    @patch("quads.tools.roce.quads")
-    def test_uninstall_roce_dry_run(self, mock_quads, mock_juniper_cls):
-        from quads.tools.roce import RoCEConfigurator
-
-        iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
-        mock_quads.get_host.return_value = self._make_host("host01", [iface])
-
-        configurator = RoCEConfigurator("host01", "uninstall_roce", dry_run=True)
-        assert configurator.run() is True
-        mock_juniper_cls.assert_not_called()
-
-    # --configure tests
 
     @patch("quads.tools.roce.JuniperRoCE")
     @patch("quads.tools.roce.quads")
@@ -420,7 +389,7 @@ class TestRoCEConfigurator:
         mock_instance.has_base_config.return_value = False
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1"])
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1"])
         assert configurator.run() is False
         mock_instance.apply_interface_config.assert_not_called()
 
@@ -439,7 +408,7 @@ class TestRoCEConfigurator:
         mock_instance.apply_interface_config.return_value = True
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1", "em3"])
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1", "em3"])
         assert configurator.run() is True
         assert mock_instance.apply_interface_config.call_count == 2
 
@@ -457,7 +426,7 @@ class TestRoCEConfigurator:
         mock_instance.apply_interface_config.side_effect = [False, True]
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1", "em2"])
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1", "em2"])
         assert configurator.run() is False
         assert mock_instance.apply_interface_config.call_count == 2
 
@@ -473,7 +442,7 @@ class TestRoCEConfigurator:
         mock_instance.connect.side_effect = JuniperRoCEException("Fail")
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1"])
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1"])
         assert configurator.run() is False
 
     @patch("quads.tools.roce.JuniperRoCE")
@@ -484,11 +453,11 @@ class TestRoCEConfigurator:
         iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
         mock_quads.get_host.return_value = self._make_host("host01", [iface])
 
-        configurator = RoCEConfigurator("host01", "configure", interfaces=["em1"], dry_run=True)
+        configurator = RoCEConfigurator("configure", host="host01", interfaces=["em1"], dry_run=True)
         assert configurator.run() is True
         mock_juniper_cls.assert_not_called()
 
-    # --remove tests
+    # --remove tests (uses --host + --interfaces)
 
     @patch("quads.tools.roce.JuniperRoCE")
     @patch("quads.tools.roce.quads")
@@ -503,7 +472,7 @@ class TestRoCEConfigurator:
         mock_instance.remove_interface_config.return_value = True
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "remove", interfaces=["em1"])
+        configurator = RoCEConfigurator("remove", host="host01", interfaces=["em1"])
         assert configurator.run() is True
         mock_instance.remove_interface_config.assert_called_once()
 
@@ -519,7 +488,7 @@ class TestRoCEConfigurator:
         mock_instance.connect.side_effect = JuniperRoCEException("Fail")
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "remove", interfaces=["em1"])
+        configurator = RoCEConfigurator("remove", host="host01", interfaces=["em1"])
         assert configurator.run() is False
 
     @patch("quads.tools.roce.JuniperRoCE")
@@ -535,7 +504,7 @@ class TestRoCEConfigurator:
         mock_instance.remove_interface_config.side_effect = [False, True]
         mock_juniper_cls.return_value = mock_instance
 
-        configurator = RoCEConfigurator("host01", "remove", interfaces=["em1", "em2"])
+        configurator = RoCEConfigurator("remove", host="host01", interfaces=["em1", "em2"])
         assert configurator.run() is False
         assert mock_instance.remove_interface_config.call_count == 2
 
@@ -547,6 +516,6 @@ class TestRoCEConfigurator:
         iface = self._make_interface("em1", "10.0.0.1", "et-0/0/1:0")
         mock_quads.get_host.return_value = self._make_host("host01", [iface])
 
-        configurator = RoCEConfigurator("host01", "remove", interfaces=["em1"], dry_run=True)
+        configurator = RoCEConfigurator("remove", host="host01", interfaces=["em1"], dry_run=True)
         assert configurator.run() is True
         mock_juniper_cls.assert_not_called()
