@@ -42,7 +42,15 @@ Base config actions (`--install-roce`, `--uninstall-roce`) target switches direc
 ## Prerequisites
 
    - For `--configure`/`--remove`: host must exist in QUADS with interfaces defined
-   - SSH key-based access to Juniper switches via the `junos_username` configured in `quads.yml`
+   - Juniper plugin enabled in `plugins.yml` with the SSH username:
+     ```yaml
+     plugins:
+       juniper:
+         enabled: true
+         username: scaleadmin
+     ```
+   - SSH key-based access to the Juniper switches for the configured username
+   - A `~/.ssh/config` entry for each switch with the appropriate identity file (see [switch-host-setup.md](switch-host-setup.md#physical-switch-setup))
 
 ## Usage
 

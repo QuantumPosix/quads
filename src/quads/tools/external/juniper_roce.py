@@ -57,6 +57,10 @@ BASE_CONFIG_COMMANDS = [
     "set firewall family ethernet-switching filter RoCE-Ingress-Map term match-roce-dscp then forwarding-class roce-lossless",
     "set firewall family ethernet-switching filter RoCE-Ingress-Map term match-roce-dscp then loss-priority low",
     "set firewall family ethernet-switching filter RoCE-Ingress-Map term default then accept",
+    "set class-of-service interfaces ae0 congestion-notification-profile storage-cnp",
+    "set class-of-service interfaces ae0 scheduler-map storage-fabric-map",
+    "set class-of-service interfaces ae0 unit * classifiers ieee-802.1 STORAGE-CLASSIFIER-L2",
+    "set class-of-service interfaces ae0 unit * rewrite-rules ieee-802.1 STORAGE-REWRITE",
 ]
 
 INTERFACE_CONFIG_TEMPLATE = [
@@ -81,6 +85,10 @@ BASE_CONFIG_DELETE_COMMANDS = [
     "delete class-of-service schedulers qinq-sched",
     "delete class-of-service schedulers roce-sched",
     "delete firewall family ethernet-switching filter RoCE-Ingress-Map",
+    "delete class-of-service interfaces ae0 congestion-notification-profile",
+    "delete class-of-service interfaces ae0 scheduler-map",
+    "delete class-of-service interfaces ae0 unit * classifiers ieee-802.1 STORAGE-CLASSIFIER-L2",
+    "delete class-of-service interfaces ae0 unit * rewrite-rules ieee-802.1 STORAGE-REWRITE",
 ]
 
 INTERFACE_CONFIG_DELETE_TEMPLATE = [
