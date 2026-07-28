@@ -16,10 +16,11 @@ quads = QuadsApi(Config)
 
 
 class RoCEConfigurator:
-    def __init__(self, hostname, action, interfaces=None, dry_run=False):
-        self.hostname = hostname
+    def __init__(self, action, host=None, interfaces=None, switches=None, dry_run=False):
         self.action = action
+        self.hostname = host
         self.interfaces = interfaces
+        self.switches = switches or []
         self.dry_run = dry_run
 
     def _get_host(self):
@@ -31,12 +32,6 @@ class RoCEConfigurator:
             logger.error("Host %s has no interfaces defined", self.hostname)
             return None
         return host
-
-    def _get_switch_map(self, host):
-        switch_map = defaultdict(list)
-        for interface in host.interfaces:
-            switch_map[interface.switch_ip].append(interface)
-        return switch_map
 
     def _get_filtered_switch_map(self, host):
         available = {iface.name for iface in host.interfaces}
@@ -66,19 +61,10 @@ class RoCEConfigurator:
         return dispatch[self.action]()
 
     def install_roce(self):
-        host = self._get_host()
-        if host is None:
-            return False
-
-        switch_map = self._get_switch_map(host)
-        logger.info(
-            "Installing base RoCE config for host %s: %d switch(es)",
-            self.hostname,
-            len(switch_map),
-        )
+        logger.info("Installing base RoCE config on %d switch(es)", len(self.switches))
 
         all_success = True
-        for switch_ip in switch_map:
+        for switch_ip in self.switches:
             if self.dry_run:
                 logger.info(
                     "[DRY RUN] Would install base RoCE config on switch: %s",
@@ -113,19 +99,10 @@ class RoCEConfigurator:
         return all_success
 
     def uninstall_roce(self):
-        host = self._get_host()
-        if host is None:
-            return False
-
-        switch_map = self._get_switch_map(host)
-        logger.info(
-            "Uninstalling base RoCE config for host %s: %d switch(es)",
-            self.hostname,
-            len(switch_map),
-        )
+        logger.info("Uninstalling base RoCE config from %d switch(es)", len(self.switches))
 
         all_success = True
-        for switch_ip in switch_map:
+        for switch_ip in self.switches:
             if self.dry_run:
                 logger.info(
                     "[DRY RUN] Would uninstall base RoCE config from switch: %s",
@@ -279,18 +256,15 @@ class RoCEConfigurator:
 
 
 def main():  # pragma: no cover
-    parser = argparse.ArgumentParser(description="Manage RoCE configuration on switches for a QUADS host")
-    parser.add_argument("--host", required=True, help="Hostname (e.g., host01.example.com)")
-    parser.add_argument(
-        "--interfaces",
-        type=str,
-        default=None,
-        help="Comma-separated interface names (e.g., em1,em3)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without applying changes",
+    parser = argparse.ArgumentParser(
+        description="Manage RoCE configuration on switches for QUADS hosts",
+        usage="""%(prog)s <action> <target> [--dry-run]
+
+  %(prog)s --install-roce --sw <ip>
+  %(prog)s --install-roce --sw-list <file>
+  %(prog)s --uninstall-roce --sw <ip>
+  %(prog)s --configure --host <hostname> --interfaces <em1,em3>
+  %(prog)s --remove --host <hostname> --interfaces <em1,em3>""",
     )
 
     actions = parser.add_mutually_exclusive_group(required=True)
@@ -323,16 +297,70 @@ def main():  # pragma: no cover
         help="Remove per-interface RoCE config (leaves base config intact)",
     )
 
+    parser.add_argument(
+        "--sw",
+        default=None,
+        help="Switch IP or hostname",
+    )
+    parser.add_argument(
+        "--sw-list",
+        default=None,
+        help="Path to file with one switch IP or hostname per line",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Hostname",
+    )
+    parser.add_argument(
+        "--interfaces",
+        type=str,
+        default=None,
+        help="Comma-separated interface names",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without applying changes",
+    )
+
     args = parser.parse_args()
 
-    if args.action in ("configure", "remove") and not args.interfaces:
-        parser.error(f"--interfaces is required for --{args.action.replace('_', '-')}")
+    if args.action in ("install_roce", "uninstall_roce"):
+        if not args.sw and not args.sw_list:
+            parser.error("--sw or --sw-list is required for --install-roce and --uninstall-roce")
+        if args.sw and args.sw_list:
+            parser.error("--sw and --sw-list are mutually exclusive")
+
+    if args.action in ("configure", "remove"):
+        if not args.host:
+            parser.error("--host is required for --configure and --remove")
+        if not args.interfaces:
+            parser.error("--interfaces is required for --configure and --remove")
+
+    switches = None
+    if args.sw:
+        switches = [args.sw]
+    elif args.sw_list:
+        try:
+            with open(args.sw_list) as f:
+                switches = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            parser.error(f"Switch list file not found: {args.sw_list}")
+        if not switches:
+            parser.error(f"Switch list file is empty: {args.sw_list}")
 
     iface_list = None
     if args.interfaces:
         iface_list = [i.strip() for i in args.interfaces.split(",")]
 
-    configurator = RoCEConfigurator(args.host, args.action, interfaces=iface_list, dry_run=args.dry_run)
+    configurator = RoCEConfigurator(
+        args.action,
+        host=args.host,
+        interfaces=iface_list,
+        switches=switches,
+        dry_run=args.dry_run,
+    )
     success = configurator.run()
     sys.exit(0 if success else 1)
 
