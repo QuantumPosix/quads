@@ -1,7 +1,7 @@
 QUADS RoCE Switch Configuration Tool
 =====================================
 
-Standalone tool for managing RoCE (RDMA over Converged Ethernet) QoS/CoS configuration on Juniper switches managed by QUADS. RoCE layers on top of existing QinQ configurations and is applied per-cloud.
+Standalone tool for managing RoCE (RDMA over Converged Ethernet) QoS/CoS configuration on Juniper switches managed by QUADS. RoCE layers on top of existing QinQ configurations and is applied per-host with specific interface selection.
 
    * [Overview](#overview)
    * [Prerequisites](#prerequisites)
@@ -29,11 +29,17 @@ The tool provides four mutually exclusive actions to manage the RoCE lifecycle o
 | `--remove` | Remove per-interface RoCE bindings (return to base QinQ) |
 | `--uninstall-roce` | Remove base RoCE config from switches |
 
-It discovers all hosts assigned to a cloud, groups their interfaces by switch IP, and applies or removes configuration via SSH.
+All actions require `--host`. The `--configure` and `--remove` actions also require `--interfaces` to specify which NICs to target (not all interfaces are RoCE capable).
+
+| Argument | Required | Used by |
+|----------|----------|---------|
+| `--host` | Always | All four actions |
+| `--interfaces` | `--configure` and `--remove` | Comma-separated interface names |
+| `--dry-run` | Optional | All four actions |
 
 ## Prerequisites
 
-   - The cloud must have an active assignment
+   - Host must exist in QUADS with interfaces defined
    - Host interfaces must have `switch_ip` and `switch_port` defined
    - SSH key-based access to Juniper switches via the `junos_username` configured in `quads.yml`
 
@@ -41,34 +47,34 @@ It discovers all hosts assigned to a cloud, groups their interfaces by switch IP
 
 ### Install Base RoCE Config
 
-One-time setup per switch. Installs CoS classifiers, forwarding classes, schedulers, drop profiles, congestion notification, rewrite rules, and the RoCE-Ingress-Map firewall filter. Skips switches that already have it.
+One-time setup per switch. Installs CoS classifiers, forwarding classes, schedulers, drop profiles, congestion notification, rewrite rules, and the RoCE-Ingress-Map firewall filter. Skips switches that already have it. Uses all host interfaces to discover which switches to configure.
 
 ```bash
-PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --install-roce
+PYTHONPATH=src python -m quads.tools.roce --host host01.example.com --install-roce
 ```
 
 ### Configure Interfaces
 
-Apply per-interface RoCE bindings after a QUADS allocation. Requires base config to already be installed (will error if not).
+Apply per-interface RoCE bindings to specific interfaces. Requires base config to already be installed (will error if not). Use `--interfaces` to specify which NICs.
 
 ```bash
-PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --configure
+PYTHONPATH=src python -m quads.tools.roce --host host01.example.com --interfaces em1,em3 --configure
 ```
 
 ### Remove Interface Config
 
-Remove per-interface RoCE bindings, returning interfaces to base QinQ. Leaves base RoCE config intact on the switch.
+Remove per-interface RoCE bindings from specific interfaces, returning them to base QinQ. Leaves base RoCE config intact on the switch.
 
 ```bash
-PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --remove
+PYTHONPATH=src python -m quads.tools.roce --host host01.example.com --interfaces em1,em3 --remove
 ```
 
 ### Uninstall Base RoCE Config
 
-Remove all base RoCE config from the switches. Skips switches that don't have it.
+Remove all base RoCE config from the host's switches. Skips switches that don't have it.
 
 ```bash
-PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --uninstall-roce
+PYTHONPATH=src python -m quads.tools.roce --host host01.example.com --uninstall-roce
 ```
 
 ### Dry Run
@@ -76,32 +82,32 @@ PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --uninstall-roce
 Add `--dry-run` to any action to see what would happen without making changes. No SSH connections are made.
 
 ```bash
-PYTHONPATH=src python -m quads.tools.roce --cloud cloud02 --configure --dry-run
+PYTHONPATH=src python -m quads.tools.roce --host host01.example.com --interfaces em1,em3 --configure --dry-run
 ```
 
 Example output:
 
 ```
-Configuring RoCE interfaces for cloud cloud02: 2 switch(es)
+Configuring RoCE interfaces for host host01.example.com: 1 switch(es)
 [DRY RUN] Would configure interfaces on switch: 10.1.36.200
 [DRY RUN] Would apply interface config for: et-0/0/7:0
-[DRY RUN] Would apply interface config for: et-0/0/7:1
-[DRY RUN] Would configure interfaces on switch: 10.1.36.201
-[DRY RUN] Would apply interface config for: et-0/0/8:0
+[DRY RUN] Would apply interface config for: et-0/0/7:2
 ```
 
 ## Typical Workflow
 
 ```
-1. Install base RoCE on switches    --install-roce    (once per switch)
-2. QUADS allocates hosts to cloud
-3. Apply per-interface RoCE config   --configure       (after allocation)
-4. Hosts are used with RoCE
-5. Remove per-interface config       --remove          (before reallocation)
-6. QUADS deallocates hosts
+1. Install base RoCE on host's switches   --install-roce                  (once per switch)
+2. QUADS allocates host to cloud
+3. Apply RoCE to specific interfaces       --interfaces em1,em3 --configure
+4. Host is used with RoCE on em1 and em3
+5. Remove interface config                 --interfaces em1,em3 --remove
+6. QUADS deallocates host
 ```
 
 Repeat steps 2-6 for each allocation cycle. Step 1 only needs to run once per switch unless `--uninstall-roce` is used.
+
+For multiple hosts, run the tool once per host.
 
 ## What It Does
 
@@ -142,7 +148,7 @@ Applied once per switch via `--install-roce`. The tool checks for existing confi
 
 ### Per-Interface Config
 
-Applied to each host-facing switch port via `--configure`:
+Applied to selected host-facing switch ports via `--configure`:
 
 ```
 set interfaces <port> unit 0 family ethernet-switching filter input RoCE-Ingress-Map
@@ -160,6 +166,7 @@ delete class-of-service interfaces <port> scheduler-map
 
 ## Behavior Details
 
+   - **Interface validation** - The tool validates that all requested interface names exist on the host before proceeding. Unknown names produce an error.
    - **Idempotent** - Junos `set` and `delete` commands are safe to re-apply.
    - **Error handling** - If a switch connection fails, the tool logs the error and continues to the next switch. If an individual interface operation fails, remaining interfaces on that switch still get processed.
    - **Single SSH session per switch** - One pexpect SSH connection per switch, reused for all operations on that switch.
@@ -172,3 +179,7 @@ The Juniper implementation lives in `src/quads/tools/external/juniper_roce.py`. 
    1. Create `src/quads/tools/external/<vendor>_roce.py` with the same interface: `has_base_config()`, `connect()`, `apply_base_config()`, `apply_interface_config(switch_port)`, `remove_base_config()`, `remove_interface_config(switch_port)`, `close()`
    2. Populate the vendor-specific commands
    3. Update `roce.py` to select the appropriate implementation based on switch vendor
+
+## TODO
+
+   - Add a `roce_capable` field to the Interface model to programmatically determine which interfaces support RoCEv2 by host model (requires schema update)
